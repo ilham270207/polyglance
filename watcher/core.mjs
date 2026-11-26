@@ -699,6 +699,70 @@ export function parseAskAnswer(content) {
   return lines.map((l) => (l.length > 100 ? l.slice(0, 100) : l)).join('\n')
 }
 
+// ---------------------------------------------------------------------------
+// v8.3 — ASK-WEB (POST /ask-web): otak KEDUA, khusus website.
+// /ask (kacamata) sengaja sempit: live-data only, max 2 baris. /ask-web
+// menjawab pertanyaan UMUM pengunjung website — produk + pengetahuan crypto
+// umum + data live yang sama. Larangan prediksi/advice TETAP berlaku
+// (pre-check isAskRefusalNeeded yang sama + system prompt yang sama
+// tegasnya). Jawaban boleh lebih panjang (web, bukan kacamata): max ~6
+// baris pendek. Rate cap TERPISAH dari /ask (lihat worker.js).
+// ---------------------------------------------------------------------------
+
+/** System prompt Groq chat untuk ASK-WEB — asisten umum website PolyGlance.
+  Tahu produk + crypto umum, jawab dari data live kalau soalnya soal pasar
+  saat ini. Tetap: TIDAK PERNAH prediksi harga / advice / rekomendasi
+  beli-jual — kalau ditanya itu, balas persis ASK_REFUSAL. */
+export const ASK_WEB_SYSTEM_PROMPT = [
+  'You are PolyGlance, the friendly assistant on the PolyGlance website.',
+  'PolyGlance is an app for Even Realities G2 smart glasses: live crypto prices (BTC, ETH, SOL, DOGE, XRP), Polymarket odds, paper trading with $10,000 virtual money, voice commands, Hyperliquid perpetual prices with funding and open interest (read-only), whale trades over $1,000, a market mood view, and a Telegram bot @polyglance_alerts_bot with price alerts, odds alerts and a Morning Brief at 08:00 WIB.',
+  'It was built solo by developer ilham (ilham270207) — one person, not a team.',
+  'People can try PolyGlance without glasses: the simulator on this website, the Telegram bot, or the Android companion APK. PolyGlance is free. It is a hackathon build for the Even Realities Heads Up hackathon (dorahacks.io/build/51900).',
+  'You also know general crypto: what Bitcoin and Ethereum are, how Polymarket prediction markets work (YES/NO shares, prices reflect probabilities), and what the Fear & Greed Index means.',
+  'For questions about current prices, odds or market data, answer ONLY from the live data below and quote real numbers from it. For general questions, answer from your own knowledge. Max 6 short lines. NEVER predict future prices, NEVER give financial advice, NEVER recommend buying or selling. If the question asks for a prediction or advice, reply exactly: "I can share live data, not predictions or advice." If the live data does not cover a market question, say so in one line. English only, plain ASCII.',
+].join(' ')
+
+/** Pesan Groq chat untuk ASK-WEB: system + user (data live + pertanyaan). */
+export function buildAskWebMessages(question, dataLines) {
+  const data = (dataLines || []).filter(Boolean).join('\n')
+  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+  return [
+    { role: 'system', content: ASK_WEB_SYSTEM_PROMPT },
+    { role: 'user', content: `Live data (UTC ${stamp}):\n${data || 'no live data available'}\n\nQuestion: ${question}` },
+  ]
+}
+
+/** Parse jawaban Groq chat untuk web -> maks 6 baris non-kosong, tiap baris
+  <=200 karakter (web punya ruang, bukan kacamata). Return null kalau tidak
+  ada isi (pemanggil menampilkan pesan gagal). */
+export function parseAskWebAnswer(content) {
+  if (!content || typeof content !== 'string') return null
+  const lines = content.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 6)
+  if (lines.length === 0) return null
+  return lines.map((l) => (l.length > 200 ? l.slice(0, 200) : l)).join('\n')
+}
+
+/** Validasi pertanyaan /ask-web: string 3..500 karakter (setelah trim).
+  Dipakai handleAskWeb di worker.js — batas 500 (bukan 200 seperti /ask)
+  karena pengunjung website mengetik pertanyaan yang lebih panjang. */
+export function isValidAskWebQuestion(question) {
+  if (!question || typeof question !== 'string') return false
+  const len = question.trim().length
+  return len >= 3 && len <= 500
+}
+
+/** Rate cap /ask-web: maks 60 pertanyaan per menit per isolate (counter
+  terpisah dari /ask — lihat worker.js askWebGroq). */
+export const ASK_WEB_RATE_LIMIT_PER_MIN = 60
+
+/** Header CORS /ask-web (dipakai worker.js untuk OPTIONS + semua respons
+  POST): website pengunjung mana pun boleh POST dari browser. */
+export const ASK_WEB_CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+}
+
 /** Format USD ringkas untuk WHALES: $12.4K · $150K · $1.2M. */
 export function formatWhaleUsd(usd) {
   if (typeof usd !== 'number' || !Number.isFinite(usd)) return '$?'

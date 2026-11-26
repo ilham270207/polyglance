@@ -42,6 +42,11 @@ import {
   ASK_REFUSAL,
   buildAskMessages,
   parseAskAnswer,
+  buildAskWebMessages,
+  parseAskWebAnswer,
+  isValidAskWebQuestion,
+  ASK_WEB_RATE_LIMIT_PER_MIN,
+  ASK_WEB_CORS_HEADERS,
   parseWhaleTrades,
   formatWhalesReply,
   formatMorningBrief,
@@ -83,6 +88,8 @@ const WHALES_CACHE_MS = 45 * 1000 // trade paus bergerak cepat — cache pendek
 const FNG_CACHE_MS = 5 * 60 * 1000 // Fear & Greed berubah 1x/hari — cache panjang
 let askMinuteCount = 0 // batas in-memory: maks 60 pertanyaan ASK per menit per isolate
 let askMinuteStart = 0
+let askWebMinuteCount = 0 // batas in-memory TERPISAH untuk /ask-web: maks 60/menit per isolate
+let askWebMinuteStart = 0
 let whalesCache = null // {trades, updatedAt, count}
 let whalesCacheAt = 0
 let fngCache = null // {value, label, updatedAt}
@@ -1289,6 +1296,46 @@ async function askGroq(question, env) {
   return { answer }
 }
 
+/**
+ * Satu pertanyaan ASK-WEB -> Groq chat (model yang sama, qwen/qwen3.8-27b).
+ * Return {answer} | {answer: ASK_REFUSAL, refused:true} | {error}.
+ * Cerminan askGroq, bedanya: prompt umum + jawaban sampai 6 baris
+ * (parseAskWebAnswer), batas pertanyaan 3..500 karakter (dicek di
+ * handleAskWeb), dan rate cap TERPISAH (60/menit per isolate) supaya
+ * trafik website tidak memakan kuota /ask kacamata — dan sebaliknya.
+ */
+async function askWebGroq(question, env) {
+  if (isAskRefusalNeeded(question)) return { answer: ASK_REFUSAL, refused: true }
+  if (!env.GROQ_API_KEY) return { error: 'GROQ_API_KEY secret not set' }
+  const now = Date.now()
+  if (now - askWebMinuteStart >= 60000) { askWebMinuteStart = now; askWebMinuteCount = 0 }
+  if (askWebMinuteCount >= ASK_WEB_RATE_LIMIT_PER_MIN) return { error: 'ask-web rate limit — try again in a minute' }
+  askWebMinuteCount++
+  const dataLines = await askLiveContext()
+  let res
+  try {
+    res = await fetch(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: GROQ_CHAT_MODEL,
+        messages: buildAskWebMessages(question, dataLines),
+        temperature: 0.3,
+        max_tokens: 400,
+      }),
+      signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
+    })
+  } catch {
+    return { error: 'groq unreachable' }
+  }
+  if (!res.ok) return { error: `groq ${res.status}` }
+  let data
+  try { data = await res.json() } catch { return { error: 'bad groq response' } }
+  const answer = parseAskWebAnswer(data?.choices?.[0]?.message?.content)
+  if (!answer) return { error: 'empty groq answer' }
+  return { answer }
+}
+
 const askCorsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -1309,6 +1356,27 @@ async function handleAsk(request, env) {
   const out = await askGroq(question, env)
   if (out.error) return Response.json({ error: out.error }, { status: 502, headers: askCorsHeaders })
   return Response.json({ answer: out.answer, refused: !!out.refused }, { headers: askCorsHeaders })
+}
+
+const askWebCorsHeaders = ASK_WEB_CORS_HEADERS
+
+/** POST /ask-web {question} -> {answer} | {answer: penolakan, refused:true}.
+  Otak umum website (bukan kacamata): pertanyaan umum dijawab dari
+  pengetahuan produk + crypto umum + data live; prediksi/advice ditolak
+  (isAskRefusalNeeded, sebelum Groq). Batas pertanyaan 3..500 karakter.
+  Groq gagal -> 502 {error} (widget yang menangani fallback, seperti /ask). */
+async function handleAskWeb(request, env) {
+  let body
+  try { body = await request.json() } catch {
+    return Response.json({ error: 'expected JSON {question}' }, { status: 400, headers: askWebCorsHeaders })
+  }
+  const question = typeof body?.question === 'string' ? body.question.trim() : ''
+  if (!isValidAskWebQuestion(question)) {
+    return Response.json({ error: 'question must be 3..500 characters' }, { status: 400, headers: askWebCorsHeaders })
+  }
+  const out = await askWebGroq(question, env)
+  if (out.error) return Response.json({ error: out.error }, { status: 502, headers: askWebCorsHeaders })
+  return Response.json({ answer: out.answer, refused: !!out.refused }, { headers: askWebCorsHeaders })
 }
 
 const whalesCorsHeaders = {
@@ -1539,6 +1607,14 @@ export default {
       // v8.2 ASK: tanya pasar -> jawaban AI 2 baris dari data live.
       return handleAsk(request, env)
     }
+    if (request.method === 'OPTIONS' && url.pathname === '/ask-web') {
+      return new Response(null, { status: 204, headers: askWebCorsHeaders })
+    }
+    if (request.method === 'POST' && url.pathname === '/ask-web') {
+      // v8.3 ASK-WEB: otak umum website -> jawaban AI sampai 6 baris
+      // (produk + crypto umum + data live). /ask kacamata tidak berubah.
+      return handleAskWeb(request, env)
+    }
     if (request.method === 'OPTIONS' && url.pathname === '/whales') {
       return new Response(null, { status: 204, headers: whalesCorsHeaders })
     }
@@ -1556,7 +1632,7 @@ export default {
     return Response.json({
       ok: true,
       service: 'polyglance-watcher',
-      usage: 'GET /health — status (incl. webhook); GET /app — dashboard read-only; GET /setwebhook — pasang webhook Telegram ke /webhook (URL tetap); GET /webhookinfo — status webhook live; GET /setupbot — pasang profil bot + menu button (sekali-pakai); GET /botinfo — profil + menu button live; POST /webhook — Telegram webhook; POST /stt — STT fallback proxy (multipart file=WAV, needs GROQ_API_KEY secret); POST /ask — ask the market (JSON {question}, needs GROQ_API_KEY secret); GET /whales — big Polymarket crypto trades ($1,000+); GET /fng — Fear & Greed Index',
+      usage: 'GET /health — status (incl. webhook); GET /app — dashboard read-only; GET /setwebhook — pasang webhook Telegram ke /webhook (URL tetap); GET /webhookinfo — status webhook live; GET /setupbot — pasang profil bot + menu button (sekali-pakai); GET /botinfo — profil + menu button live; POST /webhook — Telegram webhook; POST /stt — STT fallback proxy (multipart file=WAV, needs GROQ_API_KEY secret); POST /ask — ask the market (JSON {question}, needs GROQ_API_KEY secret); POST /ask-web — ask the website assistant (JSON {question}, needs GROQ_API_KEY secret); GET /whales — big Polymarket crypto trades ($1,000+); GET /fng — Fear & Greed Index',
     })
   },
 }
