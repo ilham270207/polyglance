@@ -324,7 +324,7 @@ console.log('10. /app dashboard')
   check('odds alert tampil', html.includes('YES above 60%'))
   check('link repo TIDAK tampil', !html.includes('github.com') && !html.includes('GitHub repo'))
   check('link Build tampil', html.includes('dorahacks.io/build/51900'))
-  check('link video tampil', html.includes('youtube.com/watch?v=sYCcHEM65EI'))
+  check('link video tampil', html.includes('youtube.com/watch?v=8XkZofCfyzk'))
   check('TIDAK ada chatId di HTML', !html.includes('chatId'))
   check('header status tampil', html.includes('Webhook:') && html.includes('Source: Coinbase'))
   gammaMarkets = []

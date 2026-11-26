@@ -99,7 +99,7 @@ const BOT_COMMANDS = [
 ]
 const MENU_BUTTON = { type: 'web_app', text: 'Open PolyGlance', web_app: { url: 'https://polyglance-watcher.danham322.workers.dev/app' } }
 const BUILD_URL = 'https://dorahacks.io/build/51900'
-const VIDEO_URL = 'https://www.youtube.com/watch?v=sYCcHEM65EI'
+const VIDEO_URL = 'https://www.youtube.com/watch?v=8XkZofCfyzk'
 
 const tg = (token) => `https://api.telegram.org/bot${token}`
 
