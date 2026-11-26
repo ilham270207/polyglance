@@ -114,7 +114,7 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 ## Demo
 
-▶️ [Watch the 109-second demo on YouTube](https://www.youtube.com/watch?v=sYCcHEM65EI) — "PolyGlance — Crypto at a Glance on Even Realities G2 (Voice + Telegram)": TICKER, ODDS, paper trading, ALERTS, a live voice command, and the Telegram bot in action.
+▶️ [Watch the 121-second demo on YouTube](https://www.youtube.com/watch?v=8XkZofCfyzk) — "PolyGlance v8 — Crypto at a Glance on Even Realities G2 (Voice + Telegram + Odds Alerts + Hyperliquid)": TICKER, ODDS, paper trading, ALERTS, Hyperliquid perps, a live voice command, and the Telegram bot in action.
 
 ## Tech stack
 
