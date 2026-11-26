@@ -1,0 +1,70 @@
+1
+00:00:00,150 --> 00:00:05,780
+PolyGlance. Crypto at a glance,
+on Even Realities G2.
+
+2
+00:00:06,780 --> 00:00:13,470
+The ticker view shows live Bitcoin
+and Ethereum prices from CoinGecko,
+refreshing every sixty seconds.
+
+3
+00:00:14,480 --> 00:00:22,610
+Tap once for live prediction market
+odds from Polymarket. Real Bitcoin
+markets, with the live chance of
+each outcome.
+
+4
+00:00:23,620 --> 00:00:28,860
+Tap again for paper trading. You start
+with ten thousand virtual dollars.
+
+5
+00:00:28,960 --> 00:00:37,980
+Swipe up to buy one hundred dollars
+of Bitcoin. Cash, holdings and profit
+update instantly. No real money,
+just practice.
+
+6
+00:00:38,980 --> 00:00:46,580
+The new alerts view watches Bitcoin
+for you. Set a target price, and the
+glasses tell you the moment it hits.
+
+7
+00:00:46,680 --> 00:00:52,100
+It also shows your Telegram bot,
+so alerts reach you even when
+the glasses are off.
+
+8
+00:00:53,120 --> 00:00:57,020
+And now, voice. Just speak
+to the glasses.
+
+9
+00:00:57,120 --> 00:01:06,400
+Say buy one hundred Bitcoin, and
+PolyGlance does it. Voice commands
+run through Groq Whisper,
+right on the glasses.
+
+10
+00:01:07,420 --> 00:01:10,320
+The Telegram bot keeps watching
+in the cloud.
+
+11
+00:01:10,420 --> 00:01:18,540
+Set an alert from any chat, and it
+pings you the moment Bitcoin crosses
+your price. It runs on a Cloudflare
+Worker, day and night.
+
+12
+00:01:19,550 --> 00:01:26,550
+PolyGlance. Prices, odds, paper trading,
+alerts and voice. Hands free, at a glance.

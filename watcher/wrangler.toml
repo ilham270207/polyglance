@@ -1,0 +1,14 @@
+name = "polyglance-watcher"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# KV untuk state watcher (offset getUpdates, alerts, harga terakhir).
+# Buat dulu:  wrangler kv namespace create ALERTS_KV
+# Lalu ganti id di bawah dengan id yang dikembalikan perintah itu.
+[[kv_namespaces]]
+binding = "ALERTS_KV"
+id = "a0f9d7bfccb04a1babe255cf9f7b6a16"
+
+# Cron trigger: tick tiap 1 menit (cek harga + kirim alert + proses perintah).
+[triggers]
+crons = ["* * * * *"]

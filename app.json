@@ -1,0 +1,29 @@
+{
+  "edition": "202601",
+  "entrypoint": "index.html",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "name": "PolyGlance",
+  "package_id": "com.ilham270207.polyglance",
+  "permissions": [
+    {
+      "desc": "Fetch BTC/ETH prices, Polymarket odds and Hyperliquid perps",
+      "name": "network",
+      "whitelist": [
+        "https://api.coingecko.com",
+        "https://gamma-api.polymarket.com",
+        "https://api.hyperliquid.xyz",
+        "https://api.groq.com",
+        "https://polyglance-watcher.danham322.workers.dev"
+      ]
+    },
+    {
+      "desc": "Voice commands via glasses microphone",
+      "name": "g2-microphone"
+    }
+  ],
+  "supported_languages": [
+    "en"
+  ],
+  "version": "0.1.0"
+}
