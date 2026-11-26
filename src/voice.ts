@@ -1,11 +1,13 @@
-// PolyGlance v5 — voice command parser (pure, no SDK, no network).
+// PolyGlance v8.2 — voice command parser (pure, no SDK, no network).
 // Satu parser dipakai dua jalur: (1) hasil STT Groq Whisper, (2) command chips
 // di halaman web pendamping. Deterministik, unit-testable di Node tanpa mic.
 // Perintah dalam bahasa Inggris, pendek (Whisper paling akurat di sini).
+// v8.2: + intent ASK (pertanyaan bebas -> dijawab AI 2 baris via Worker /ask)
+// + goto whales / mood / ask.
 
 export type Coin = 'BTC' | 'ETH'
 export type AlertCoin = 'BTC' | 'ETH' | 'SOL'
-export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice'
+export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice' | 'ask' | 'whales' | 'mood'
 
 export type VoiceAction =
   | { type: 'goto'; view: VoiceView }
@@ -20,6 +22,7 @@ export type VoiceAction =
   | { type: 'cancel-odds-alert' }
   | { type: 'refresh' }
   | { type: 'stop' }
+  | { type: 'ask'; question: string }
 
 const ONES: Record<string, number> = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
@@ -90,11 +93,26 @@ function normalize(text: string): string[] {
     .filter(Boolean)
 }
 
+/** Kata awal pertanyaan (WH- + aux). Dipakai intent ASK — dicek PALING
+  AKHIR supaya semua perintah konkret (buy/sell/alert/goto) menang dulu. */
+const QUESTION_STARTERS = [
+  'why', 'what', 'how', 'when', 'where', 'which', 'who',
+  'is', 'are', 'was', 'were', 'will', 'would', 'can', 'could',
+  'should', 'do', 'does', 'did', 'explain', 'tell',
+]
+
 /** Parse satu perintah suara/teks menjadi aksi. Tidak cocok -> null (jangan nebak). */
 export function parseVoiceCommand(text: string): VoiceAction | null {
   const tokens = normalize(text)
   if (tokens.length === 0) return null
   const has = (...words: string[]): boolean => words.some((w) => tokens.includes(w))
+
+  // Bentuk pertanyaan ("should i buy bitcoin", "ask why is bitcoin down"):
+  // bukan perintah — buy/sell di bawah diskip supaya jatuh ke intent ASK
+  // di akhir (Worker yang menolak prediksi/advice). Minimal 3 token.
+  const raw = text.trim()
+  const isQuestion =
+    tokens.length >= 3 && (raw.endsWith('?') || QUESTION_STARTERS.includes(tokens[0]) || tokens[0] === 'ask')
 
   // ODDS ALERT — dicek PALING DULU, sebelum cabang alert harga, karena
   // "set odds alert above 60" mengandung kata 'alert' dan angka.
@@ -145,13 +163,14 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
     return coin ? { type: 'set-alert', target, coin } : { type: 'set-alert', target }
   }
 
-  // Buy / sell $100 (jumlah selalu 100 — "one hundred" boleh disebut atau tidak)
-  if (has('buy', 'purchase', 'purchasing')) {
+  // Buy / sell $100 (jumlah selalu 100 — "one hundred" boleh disebut atau tidak).
+  // Pertanyaan ("should i buy bitcoin") BUKAN perintah — diskip ke ASK.
+  if (has('buy', 'purchase', 'purchasing') && !isQuestion) {
     const coin = detectCoin(tokens)
     if (coin) return { type: 'buy', coin }
     return null
   }
-  if (has('sell')) {
+  if (has('sell') && !isQuestion) {
     // Jual semua: "sell all bitcoin" = semua BTC, "sell all" = semua BTC+ETH.
     // SOL tidak punya paper holding — "sell all solana" ditolak, jangan nebak.
     if (has('all')) {
@@ -169,7 +188,23 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
   if (has('odds', 'polymarket', 'bets', 'betting')) return { type: 'goto', view: 'odds' }
   if (has('hyperliquid', 'hl', 'perps', 'perp')) return { type: 'goto', view: 'hl' }
   if (has('paper', 'portfolio', 'trading', 'trade')) return { type: 'goto', view: 'paper-btc' }
+  if (has('whales', 'whale')) return { type: 'goto', view: 'whales' }
+  if (has('mood')) return { type: 'goto', view: 'mood' }
+  // "ask" saja (atau "show ask") = pindah ke view ASK. Pertanyaan panjang
+  // yang diawali "ask ..." (mis. "ask why is bitcoin down") TIDAK masuk
+  // sini — jatuh ke intent ASK di bawah supaya pertanyaannya tidak hilang.
+  if (tokens.includes('ask') && tokens.length <= 2) return { type: 'goto', view: 'ask' }
   if (has('voice')) return { type: 'goto', view: 'voice' }
+
+  // ASK (v8.2) — pertanyaan bebas, dicek PALING AKHIR: semua perintah di
+  // atas sudah menang kalau cocok. Pemicu: diakhiri '?' ATAU diawali kata
+  // tanya ATAU diawali "ask" ("ask why is bitcoin down").
+  // Contoh: "why is bitcoin down?", "is bitcoin fear or greed?",
+  // "will bitcoin reach 100k?" (masuk jalur penolakan prediksi di Worker),
+  // "should i buy bitcoin" (masuk jalur penolakan advice di Worker).
+  if (isQuestion) {
+    return { type: 'ask', question: raw.slice(0, 200) }
+  }
 
   return null
 }

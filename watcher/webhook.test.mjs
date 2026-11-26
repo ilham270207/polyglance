@@ -4,16 +4,30 @@ import { parseBotCommand } from './core.mjs'
 // Jalankan: node watcher/webhook.test.mjs  (dari root repo polyglance)
 // worker.js adalah ESM di file .js, jadi tes ini menyalinnya ke tmp dir
 // sebagai worker.mjs sebelum di-import. Tidak butuh token asli.
-import { mkdtempSync, copyFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, copyFileSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const tmp = mkdtempSync(join(tmpdir(), 'webhook-test-'))
-copyFileSync(join(HERE, 'worker.js'), join(tmp, 'worker.mjs'))
+// Salinan worker.js untuk tes DITAMBAH export reset cache (HANYA di file tmp
+// ini — worker.js produksi TIDAK diubah): tiap bagian tes memakai KV baru
+// (= isolate baru), jadi cache in-memory (flag webhook, dashboard 90 detik,
+// guard brief) harus di-reset supaya satu bagian tidak membaca state basi
+// dari bagian sebelumnya. Perilaku produksi tidak berubah (cache tetap
+// hidup ≤1 jam / ≤90 detik per isolate).
+writeFileSync(join(tmp, 'worker.mjs'), readFileSync(join(HERE, 'worker.js'), 'utf8') + `
+export function __resetCachesForTests() {
+  webhookFlagCache = null
+  webhookFlagLoaded = false
+  dashCache = { at: 0, state: null }
+  briefCache = { date: null, sentDate: null }
+}
+`)
 copyFileSync(join(HERE, 'core.mjs'), join(tmp, 'core.mjs'))
-const worker = (await import(pathToFileURL(join(tmp, 'worker.mjs')).href)).default
+const workerMod = await import(pathToFileURL(join(tmp, 'worker.mjs')).href)
+const worker = workerMod.default
 
 const WEBHOOK_URL = 'https://polyglance-watcher.danham322.workers.dev/webhook'
 
@@ -31,6 +45,8 @@ const KEY_ALERTS = 'polyglance-alerts-v1'
 const KEY_WEBHOOK = 'polyglance-webhook-v1'
 const KEY_LIVE = 'polyglance-liveprice-v1'
 function makeKv(seed = {}) {
+  // KV baru = isolate baru: reset cache in-memory worker (lihat atas).
+  if (typeof workerMod.__resetCachesForTests === 'function') workerMod.__resetCachesForTests()
   const store = new Map(Object.entries(seed))
   return {
     store,
@@ -352,11 +368,11 @@ console.log('11. /setupbot profil + menu button')
   check('deskripsi TIDAK ada link repo', !storedProfile.desc.includes('github') && !storedProfile.desc.includes('Repo:'), storedProfile.desc)
   check('deskripsi tetap ada Build', storedProfile.desc.includes('Build: dorahacks.io/build/51900'))
   // Daftar commands harus sama persis dengan yang didukung core.mjs
-  const supported = ['start', 'price', 'odds', 'alert', 'alertodds', 'list', 'remove', 'health', 'help']
+  const supported = ['start', 'price', 'odds', 'ask', 'whales', 'brief', 'alert', 'alertodds', 'list', 'remove', 'health', 'help']
   const listed = storedProfile.commands.map((c) => c.command)
-  check('9 commands terpasang', listed.length === 9 && supported.every((c) => listed.includes(c)), JSON.stringify(listed))
+  check('12 commands terpasang', listed.length === 12 && supported.every((c) => listed.includes(c)), JSON.stringify(listed))
   for (const c of supported) {
-    const sample = { start: '/start', price: '/price', odds: '/odds', alert: '/alert btc above 58000', alertodds: '/alertodds btc dip above 60', list: '/list', remove: '/remove 1', health: '/health', help: '/help' }[c]
+    const sample = { start: '/start', price: '/price', odds: '/odds', ask: '/ask why is bitcoin down?', whales: '/whales', brief: '/brief', alert: '/alert btc above 58000', alertodds: '/alertodds btc dip above 60', list: '/list', remove: '/remove 1', health: '/health', help: '/help' }[c]
     check(`/${c} dikenal core.mjs`, parseBotCommand(sample)?.cmd === c)
   }
   check('semua deskripsi perintah terisi', storedProfile.commands.every((c) => typeof c.description === 'string' && c.description.length > 0 && c.description.length <= 256))
@@ -371,7 +387,7 @@ console.log('12. /botinfo')
   check('status 200', res.status === 200)
   check('short description terbaca', data.shortDescription?.result?.short_description === storedProfile.short)
   check('description terbaca', data.description?.result?.description === storedProfile.desc)
-  check('commands terbaca', Array.isArray(data.commands?.result) && data.commands.result.length === 9)
+  check('commands terbaca', Array.isArray(data.commands?.result) && data.commands.result.length === 12)
   check('menu button terbaca', data.menuButton?.result?.type === 'web_app')
 }
 

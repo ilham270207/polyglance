@@ -38,6 +38,15 @@ import {
   candlesSvg,
   sparklineSvg,
   HELP_TEXT,
+  isAskRefusalNeeded,
+  ASK_REFUSAL,
+  buildAskMessages,
+  parseAskAnswer,
+  parseWhaleTrades,
+  formatWhalesReply,
+  formatMorningBrief,
+  briefDue,
+  shouldPersistPrices,
 } from './core.mjs'
 
 const COINGECKO_URL =
@@ -60,6 +69,25 @@ const KEY_PRICES = 'polyglance-prices-v1' // lastPrices, lastTick, priceSource, 
 const KEY_ALERTS = 'polyglance-alerts-v1' // alerts, oddsAlerts
 const KEY_WEBHOOK = 'polyglance-webhook-v1' // {active, url, setAt, checkedAt, pending} — ditulis HANYA /setwebhook + verifikasi berkala
 const KEY_LIVE = 'polyglance-liveprice-v1' // {messages: [{chatId, messageId, sentAt}]} — pesan /price yang terus di-edit tiap tick (30 menit)
+const KEY_BRIEF = 'polyglance-brief-v1' // {lastSentDate: 'YYYY-MM-DD'} — guard sekali-per-hari Morning Brief (v8.2)
+
+// --- v8.2: ASK / WHALES / MOOD / Morning Brief ---
+// Semua fitur baru TANPA KV, kecuali guard sekali-per-hari Morning Brief
+// (1 baca KV di jam 01:00 UTC + 1 tulis/hari — lihat tick §1d).
+// /ask + /whales + /fng pakai cache in-memory saja (bukan KV).
+const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions'
+const GROQ_CHAT_MODEL = 'llama-3.3-70b-versatile'
+const ASK_TIMEOUT_MS = 15000
+const WHALES_TRADES_URL = 'https://data-api.polymarket.com/v2/trades?limit=100'
+const WHALES_CACHE_MS = 45 * 1000 // trade paus bergerak cepat — cache pendek
+const FNG_CACHE_MS = 5 * 60 * 1000 // Fear & Greed berubah 1x/hari — cache panjang
+let askMinuteCount = 0 // batas in-memory: maks 60 pertanyaan ASK per menit per isolate
+let askMinuteStart = 0
+let whalesCache = null // {trades, updatedAt, count}
+let whalesCacheAt = 0
+let fngCache = null // {value, label, updatedAt}
+let fngCacheAt = 0
+let briefCache = { date: null, sentDate: null } // guard Morning Brief di memori (hemat baca KV)
 
 // Kenapa state dipecah 4 key: KV Cloudflare itu eventually consistent —
 // satu tick cron yang membaca snapshot lama lalu menyimpan ulang SELURUH
@@ -82,7 +110,7 @@ const BOT_DESCRIPTION = [
   '',
   'Live BTC/ETH prices, Polymarket odds, price alerts and odds alerts — plus SOL prices, paper trading and voice commands on the glasses.',
   '',
-  'Use /price, /odds, /alert, /alertodds, /list, /remove, /health or /help.',
+  'Use /price, /odds, /ask, /whales, /brief, /alert, /alertodds, /list, /remove, /health or /help.',
   '',
   'Build: dorahacks.io/build/51900',
 ].join('\n')
@@ -90,6 +118,9 @@ const BOT_COMMANDS = [
   { command: 'start', description: 'Start PolyGlance alerts' },
   { command: 'price', description: 'Live prices: BTC, ETH, SOL, DOGE & XRP' },
   { command: 'odds', description: 'Top 5 Polymarket crypto odds' },
+  { command: 'ask', description: 'Ask the market, e.g. /ask why is bitcoin down?' },
+  { command: 'whales', description: 'Big Polymarket crypto trades ($1,000+)' },
+  { command: 'brief', description: 'This morning\'s market digest' },
   { command: 'alert', description: 'Set a price alert, e.g. /alert btc above 58000' },
   { command: 'alertodds', description: 'Set an odds alert, e.g. /alertodds btc dip above 60' },
   { command: 'list', description: 'List your alerts' },
@@ -242,7 +273,7 @@ async function fetchCoinData(sym, state) {
  * link repo). Kalau satu sumber gagal, bagiannya tampil "unavailable"
  * kecil — halaman lain tetap jalan. */
 async function handleApp(env, url) {
-  const state = await loadAll(env.ALERTS_KV)
+  const state = await loadAllCached(env.ALERTS_KV) // cache 90 detik + fallback basi (hemat KV)
   const coin = (url.searchParams.get('coin') || 'BTC').toUpperCase()
   const tf = TF_GRANULARITY[url.searchParams.get('tf')] ? url.searchParams.get('tf') : '1h'
   const selCoin = PRICE_SYMBOLS.includes(coin) ? coin : 'BTC'
@@ -515,15 +546,22 @@ async function loadPart(kv, key, empty) {
   }
 }
 
-/** Baca semua bagian paralel, gabung jadi satu objek `state` (dipakai handler lama). */
-async function loadAll(kv) {
-  const [meta, prices, alerts, webhook, live] = await Promise.all([
+/** Baca semua bagian paralel, gabung jadi satu objek `state` (dipakai handler lama).
+ * opts.skipWebhook (v8.2, hemat KV): lewati baca KEY_WEBHOOK — tick cron
+ * memakai flag dari cache in-memory (getWebhookFlagCached) supaya tidak
+ * ada 1 baca KV/menit (= 1.440 reads/hari) untuk flag yang berubah 1x/jam.
+ * Migrasi webhook legacy juga dilewati dalam mode ini (sudah selesai
+ * sejak v1 — tidak ada lagi blob legacy yang perlu dimigrasi). */
+async function loadAll(kv, opts = {}) {
+  const [meta, prices, alerts, live] = await Promise.all([
     loadPart(kv, KEY_META, emptyMeta),
     loadPart(kv, KEY_PRICES, emptyPrices),
     loadPart(kv, KEY_ALERTS, emptyAlerts),
-    loadPart(kv, KEY_WEBHOOK, () => null),
     loadPart(kv, KEY_LIVE, emptyLive),
   ])
+  const webhook = opts.skipWebhook
+    ? webhookFlagCache
+    : await loadPart(kv, KEY_WEBHOOK, () => null)
   // Migrasi sekali (v1 -> key terpisah): kalau key baru masih kosong tapi
   // blob lama (KEY_META) masih menyimpan field itu, pakai nilai lama + tulis
   // ke key baru. `meta` sendiri membawa field legacy itu (spread di loadPart
@@ -543,7 +581,7 @@ async function loadAll(kv) {
       alerts.oddsAlerts = legacy.oddsAlerts
       migrated.alerts = true
     }
-    if (!webhook && legacy.webhook) {
+    if (!opts.skipWebhook && !webhook && legacy.webhook) {
       migrated.webhook = legacy.webhook
     }
   }
@@ -555,6 +593,58 @@ async function loadAll(kv) {
     if (migrated.webhook) await kv.put(KEY_WEBHOOK, JSON.stringify(migrated.webhook))
   } catch { /* abaikan */ }
   return state
+}
+
+// --- Hemat KV (v8.2) ---
+// Akun Cloudflare ilham kena limit KV harian 26 Nov (50% 16:27 WIB, 90%
+// 22:44 WIB; reset 00:00 UTC). Meter yang kehabisan hampir pasti WRITES
+// (batas gratis 1.000/hari): tick menulis key prices 1x/menit hanya karena
+// lastTick berubah = 1.440 writes/hari. Perbaikan ada 3:
+//  (a) throttle penulisan key prices ke 10 menit (di tick, sebelum saveChanged),
+//  (b) flag webhook di-cache in-memory (di bawah) — tick tidak lagi baca
+//      KEY_WEBHOOK tiap menit (hemat 1.440 reads/hari),
+//  (c) dashboard /app + /health pakai cache in-memory 90 detik dengan
+//      fallback snapshot basi saat KV 429/gagal (di bawah).
+// Fitur baru v8.2 (/ask, /whales, /fng, Morning Brief) TIDAK pakai KV,
+// kecuali guard sekali-per-hari Morning Brief (1 baca di jam 01:00 UTC +
+// 1 tulis/hari — lihat tick §1d).
+
+/** Cache in-memory flag webhook: dimuat sekali per isolate, disegarkan oleh
+  verifikasi berkala di tick (§2) + /setwebhook. Restart isolate = muat ulang
+  sekali (verifikasi berkala jalan di tick pertama karena checkedAt kosong). */
+let webhookFlagCache = null
+let webhookFlagLoaded = false
+
+async function getWebhookFlagCached(kv) {
+  if (webhookFlagLoaded) return webhookFlagCache
+  try {
+    const raw = await kv.get(KEY_WEBHOOK)
+    webhookFlagCache = raw ? JSON.parse(raw) : null
+  } catch {
+    webhookFlagCache = null
+  }
+  webhookFlagLoaded = true
+  return webhookFlagCache
+}
+
+/** Cache in-memory snapshot dashboard (90 detik) untuk GET /app + /health.
+  Pemakaian read-only — pemanggil TIDAK BOLEH mengubah state yang
+  dikembalikan. Saat KV gagal (429/limit), sajikan snapshot basi daripada
+  halaman error (data dashboard berumur <=90 detik di kondisi normal). */
+let dashCache = { at: 0, state: null }
+const DASH_CACHE_MS = 90 * 1000
+
+async function loadAllCached(kv) {
+  const now = Date.now()
+  if (dashCache.state && now - dashCache.at < DASH_CACHE_MS) return dashCache.state
+  try {
+    const state = await loadAll(kv)
+    dashCache = { at: now, state }
+    return state
+  } catch (e) {
+    if (dashCache.state) return dashCache.state
+    throw e
+  }
 }
 
 /** Snapshot JSON tiap bagian — untuk menyimpan hanya bagian yang berubah. */
@@ -630,7 +720,7 @@ async function editMessageText(token, chatId, messageId, text) {
   }
 }
 
-async function handleCommand(token, state, chatId, parsed) {
+async function handleCommand(token, state, chatId, parsed, env) {
   const now = new Date().toISOString()
   switch (parsed.cmd) {
     case 'start': {
@@ -686,6 +776,40 @@ async function handleCommand(token, state, chatId, parsed) {
         await sendMessage(token, chatId, lines.length ? 'Top 5 Polymarket crypto odds:\n\n' + lines.join('\n\n') : 'No odds right now.')
       } catch {
         await sendMessage(token, chatId, 'Could not fetch odds right now.')
+      }
+      return
+    }
+    case 'ask': {
+      // v8.2: tanya pasar — dijawab AI 2 baris dari data live (atau penolakan
+      // prediksi/advice). env diteruskan dari handleUpdate (butuh GROQ_API_KEY).
+      const out = await askGroq(parsed.question, env)
+      if (out.error) {
+        await sendMessage(token, chatId, 'ASK is unavailable right now — try again in a minute.')
+      } else {
+        await sendMessage(token, chatId, out.answer)
+      }
+      return
+    }
+    case 'whales': {
+      // v8.2: trade paus Polymarket — format yang sama dengan GET /whales.
+      try {
+        const res = await fetchWithTimeout(WHALES_TRADES_URL, 8000)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        const trades = parseWhaleTrades(Array.isArray(data) ? data : data?.trades ?? data?.data ?? [], Date.now())
+        await sendMessage(token, chatId, formatWhalesReply(trades))
+      } catch {
+        await sendMessage(token, chatId, 'Could not fetch whale trades right now.')
+      }
+      return
+    }
+    case 'brief': {
+      // v8.2: digest pagi ini, on-demand (tanpa menunggu jam 08:00 WIB).
+      try {
+        const text = await buildMorningBriefText(state)
+        await sendMessage(token, chatId, text)
+      } catch {
+        await sendMessage(token, chatId, 'Could not build the morning brief right now.')
       }
       return
     }
@@ -763,7 +887,7 @@ async function handleCommand(token, state, chatId, parsed) {
   }
 }
 
-async function handleUpdate(token, state, update) {
+async function handleUpdate(token, state, update, env) {
   const msg = update?.message
   if (!msg || typeof msg.text !== 'string') return
   // friendlyReply TIDAK PERNAH null: perintah valid -> jalan; perintah
@@ -771,7 +895,7 @@ async function handleUpdate(token, state, update) {
   // ringkasan). pesan penolakan mentah sudah tidak dipakai lagi.
   const routed = friendlyReply(msg.text)
   if (routed.parsed) {
-    await handleCommand(token, state, msg.chat.id, routed.parsed)
+    await handleCommand(token, state, msg.chat.id, routed.parsed, env)
   } else {
     await sendMessage(token, msg.chat.id, routed.usage)
   }
@@ -782,7 +906,10 @@ async function tick(env) {
   const token = env.POLYGLANCE_BOT_TOKEN
   if (!token) throw new Error('POLYGLANCE_BOT_TOKEN secret not set')
   const kv = env.ALERTS_KV
-  const state = await loadAll(kv)
+  // Hemat KV (v8.2): lewati baca KEY_WEBHOOK tiap menit — flag diambil dari
+  // cache in-memory (getWebhookFlagCached), disegarkan verifikasi berkala §2.
+  const state = await loadAll(kv, { skipWebhook: true })
+  state.webhook = await getWebhookFlagCached(kv)
   const snap = snapshotParts(state)
 
   // 1. Harga terbaru — CoinGecko dulu, Coinbase sebagai cadangan.
@@ -885,6 +1012,43 @@ async function tick(env) {
     }
   }
 
+  // 1d. Morning Brief (v8.2) — digest Telegram 08:00 WIB (01:00 UTC),
+  // sekali per hari, ke semua chat yang pernah /start.
+  // TANPA KV kecuali perlu: guard lastSentDate dibaca HANYA di jam 01:00 UTC
+  // (briefDue), dan cache in-memory menahan baca ulang dalam jam yang sama
+  // (maks ~1 baca KV/hari + 1 tulis/hari). Kalau brief gagal (fetch/API),
+  // tick lanjut normal — dicoba lagi tick berikutnya selama masih jam 01:00.
+  {
+    const nowMs = Date.now()
+    if (new Date(nowMs).getUTCHours() === 1 && state.chats.length > 0) {
+      const today = new Date(nowMs).toISOString().slice(0, 10)
+      let lastSent = briefCache.date === today ? briefCache.sentDate : null
+      if (briefCache.date !== today) {
+        try {
+          const raw = await kv.get(KEY_BRIEF)
+          lastSent = raw ? JSON.parse(raw)?.lastSentDate ?? null : null
+        } catch { lastSent = null }
+        briefCache = { date: today, sentDate: lastSent }
+      }
+      if (briefDue(lastSent, nowMs)) {
+        try {
+          const text = await buildMorningBriefText(state)
+          let sent = 0
+          for (const chatId of state.chats) {
+            const id = await sendMessage(token, chatId, text)
+            if (id !== null) sent++
+          }
+          if (sent > 0) {
+            await kv.put(KEY_BRIEF, JSON.stringify({ lastSentDate: today }))
+            briefCache.sentDate = today
+          }
+        } catch {
+          // Brief gagal — coba lagi tick berikutnya (masih jam 01:00 UTC)
+        }
+      }
+    }
+  }
+
   // 2. Perintah bot.
   // Webhook aktif -> SKIP polling getUpdates (Telegram mengirim update ke
   // /webhook; getUpdates akan kosong). Cron tetap jalan untuk harga + alert.
@@ -909,6 +1073,8 @@ async function tick(env) {
           pending: info?.result?.pending_update_count ?? 0,
         }
         await saveWebhookFlag(kv, flag)
+        webhookFlagCache = flag // segarkan cache in-memory (hemat baca KV)
+        webhookFlagLoaded = true
         state.webhook = flag
       }
     } catch {
@@ -922,7 +1088,7 @@ async function tick(env) {
         const data = await res.json()
         for (const u of data.result || []) {
           state.offset = u.update_id + 1
-          await handleUpdate(token, state, u)
+          await handleUpdate(token, state, u, env)
         }
       }
     } catch {
@@ -931,8 +1097,23 @@ async function tick(env) {
   }
 
   state.lastTick = new Date().toISOString()
-  // Simpan HANYA bagian yang berubah: harga selalu (lastTick), meta hanya
-  // kalau polling (offset), alert hanya kalau ada crossing.
+  // HEMAT KV (v8.2): tahan penulisan key prices — lastTick berubah tiap
+  // menit, jadi tanpa throttle key ini ditulis 1.440x/hari (melewati batas
+  // gratis 1.000 writes/hari — penyebab alert limit 26 Nov). Sekarang key
+  // prices ditulis paling cepat 10 menit sekali (shouldPersistPrices).
+  // Deteksi crossing alert TETAP aman: cek tiap tick memakai harga segar vs
+  // harga tersimpan terakhir (jendela deteksi melebar, bukan menyempit);
+  // /health + /app menampilkan lastTick yang tertinggal <=10 menit (jujur).
+  // Simpan HANYA bagian yang berubah: meta hanya kalau polling (offset),
+  // alert hanya kalau ada crossing.
+  const snapPrices = JSON.parse(snap.prices)
+  if (!shouldPersistPrices(snapPrices.lastTick)) {
+    state.lastTick = snapPrices.lastTick
+    state.lastPrices = snapPrices.lastPrices
+    state.lastOdds = snapPrices.lastOdds
+    state.priceSource = snapPrices.priceSource
+    state.priceError = snapPrices.priceError
+  }
   await saveChanged(kv, state, snap)
   return state
 }
@@ -1002,6 +1183,217 @@ async function handleStt(request, env) {
   }
 }
 
+// --- v8.2: ASK / WHALES / F&G / Morning Brief ---
+// Semua handler di bawah TANPA KV (cache in-memory saja), kecuali guard
+// sekali-per-hari Morning Brief di tick() (§1d). Groq chat memakai secret
+// GROQ_API_KEY yang SAMA dengan proxy STT (key Groq KEDUA/testing milik
+// ilham — JANGAN key utama). Key tidak pernah lewat HP/kacamata.
+
+/** Konteks live untuk ASK: harga BTC/ETH/SOL + odds Polymarket + Fear &
+  Greed + funding Hyperliquid — semua Promise.allSettled, sumber yang gagal
+  dilewati diam-diam (barisnya hilang, jawaban menyebut data yang ada). */
+async function askLiveContext() {
+  const lines = []
+  const jobs = [
+    (async () => {
+      try {
+        const coins = await fetchLivePrices(null)
+        for (const c of coins) {
+          if (c.sym === 'BTC' || c.sym === 'ETH' || c.sym === 'SOL') {
+            lines.push(`${c.sym} ${fmtPrice(c.price)}${typeof c.changePct === 'number' ? ` (${c.changePct >= 0 ? '+' : ''}${c.changePct.toFixed(1)}% 24h)` : ''}`)
+          }
+        }
+      } catch { /* baris ini hilang */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetchWithTimeout(GAMMA_URL, 5000)
+        if (res.ok) {
+          const data = await res.json()
+          const arr = Array.isArray(data) ? data : data?.markets ?? []
+          for (const m of topOddsMarkets(arr, 3)) lines.push(`Polymarket: "${m.question}" YES ${m.yes}%`)
+        }
+      } catch { /* abaikan */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetchWithTimeout(FNG_URL, 5000)
+        if (res.ok) {
+          const fng = parseFearGreed(await res.json())
+          if (fng) lines.push(`Fear & Greed: ${fng.value} (${fng.label})`)
+        }
+      } catch { /* abaikan */ }
+    })(),
+    (async () => {
+      // Funding rata-rata Hyperliquid (parse inline — hl.ts milik kacamata,
+      // bukan Worker): metaAndAssetCtxs -> [meta, assetCtxs].
+      try {
+        const res = await fetch('https://api.hyperliquid.xyz/info', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+          signal: AbortSignal.timeout(5000),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          const ctxs = Array.isArray(data) && Array.isArray(data[1]) ? data[1] : null
+          if (ctxs) {
+            const funds = ctxs.slice(0, 3).map((c) => parseFloat(String(c?.funding ?? ''))).filter(Number.isFinite)
+            if (funds.length) {
+              lines.push(`Hyperliquid funding avg: ${(funds.reduce((a, b) => a + b, 0) / funds.length * 100).toFixed(4)}%/h`)
+            }
+          }
+        }
+      } catch { /* abaikan */ }
+    })(),
+  ]
+  await Promise.allSettled(jobs)
+  return lines
+}
+
+/**
+ * Satu pertanyaan ASK -> Groq chat (llama-3.3-70b-versatile).
+ * Return {answer} | {answer: ASK_REFUSAL, refused:true} | {error}.
+ * Pre-check penolakan dulu (tanpa Groq — hemat kuota + deterministik);
+ * batas in-memory 60 pertanyaan/menit per isolate (anti-spam publik).
+ */
+async function askGroq(question, env) {
+  if (isAskRefusalNeeded(question)) return { answer: ASK_REFUSAL, refused: true }
+  if (!env.GROQ_API_KEY) return { error: 'GROQ_API_KEY secret not set' }
+  const now = Date.now()
+  if (now - askMinuteStart >= 60000) { askMinuteStart = now; askMinuteCount = 0 }
+  if (askMinuteCount >= 60) return { error: 'ask rate limit — try again in a minute' }
+  askMinuteCount++
+  const dataLines = await askLiveContext()
+  let res
+  try {
+    res = await fetch(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: GROQ_CHAT_MODEL,
+        messages: buildAskMessages(question, dataLines),
+        temperature: 0.3,
+        max_tokens: 120,
+      }),
+      signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
+    })
+  } catch {
+    return { error: 'groq unreachable' }
+  }
+  if (!res.ok) return { error: `groq ${res.status}` }
+  let data
+  try { data = await res.json() } catch { return { error: 'bad groq response' } }
+  const answer = parseAskAnswer(data?.choices?.[0]?.message?.content)
+  if (!answer) return { error: 'empty groq answer' }
+  return { answer }
+}
+
+const askCorsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+}
+
+/** POST /ask {question} -> {answer} | {answer: penolakan, refused:true}.
+  Dipakai kacamata (view ASK) + siapa pun yang POST ke endpoint ini. */
+async function handleAsk(request, env) {
+  let body
+  try { body = await request.json() } catch {
+    return Response.json({ error: 'expected JSON {question}' }, { status: 400, headers: askCorsHeaders })
+  }
+  const question = typeof body?.question === 'string' ? body.question.trim() : ''
+  if (question.length < 3 || question.length > 200) {
+    return Response.json({ error: 'question must be 3..200 characters' }, { status: 400, headers: askCorsHeaders })
+  }
+  const out = await askGroq(question, env)
+  if (out.error) return Response.json({ error: out.error }, { status: 502, headers: askCorsHeaders })
+  return Response.json({ answer: out.answer, refused: !!out.refused }, { headers: askCorsHeaders })
+}
+
+const whalesCorsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+}
+
+/** GET /whales -> {trades, updatedAt, count}. Proxy data-api v2 /trades
+  (CORS v2 belum teruji dari WebView kacamata — jangan fetch langsung dari
+  kacamata). Cache in-memory 45 detik; kalau fetch gagal, sajikan cache basi
+  (kacamata menampilkan "OFFLINE - last data"). */
+async function handleWhales() {
+  const now = Date.now()
+  if (whalesCache && now - whalesCacheAt < WHALES_CACHE_MS) {
+    return Response.json(whalesCache, { headers: whalesCorsHeaders })
+  }
+  try {
+    const res = await fetchWithTimeout(WHALES_TRADES_URL, 8000)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    const trades = parseWhaleTrades(Array.isArray(data) ? data : data?.trades ?? data?.data ?? [], now)
+    const payload = { trades, updatedAt: new Date(now).toISOString(), count: trades.length }
+    whalesCache = payload
+    whalesCacheAt = now
+    return Response.json(payload, { headers: whalesCorsHeaders })
+  } catch (e) {
+    if (whalesCache) return Response.json(whalesCache, { headers: whalesCorsHeaders })
+    return Response.json({ error: `whales unavailable (${e?.message || 'fetch gagal'})`, trades: [] }, { status: 502, headers: whalesCorsHeaders })
+  }
+}
+
+const fngCorsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+}
+
+/** GET /fng -> {value, label, updatedAt}. Proxy Alternative.me (domain ini
+  TIDAK ada di whitelist app.json — kacamata WAJIB lewat proxy ini).
+  Cache in-memory 5 menit; kalau fetch gagal, sajikan cache basi. */
+async function handleFng() {
+  const now = Date.now()
+  if (fngCache && now - fngCacheAt < FNG_CACHE_MS) {
+    return Response.json(fngCache, { headers: fngCorsHeaders })
+  }
+  try {
+    const res = await fetchWithTimeout(FNG_URL, 5000)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const fng = parseFearGreed(await res.json())
+    if (!fng) throw new Error('bad payload')
+    const payload = { value: fng.value, label: fng.label, updatedAt: new Date(now).toISOString() }
+    fngCache = payload
+    fngCacheAt = now
+    return Response.json(payload, { headers: fngCorsHeaders })
+  } catch (e) {
+    if (fngCache) return Response.json(fngCache, { headers: fngCorsHeaders })
+    return Response.json({ error: `fng unavailable (${e?.message || 'fetch gagal'})` }, { status: 502, headers: fngCorsHeaders })
+  }
+}
+
+/** Teks Morning Brief: harga 5 koin + Fear & Greed + 3 odds teratas.
+  Dipakai tick §1d (kirim 08:00 WIB) dan /brief on-demand. */
+async function buildMorningBriefText(state) {
+  const [coins, fng, topOdds] = await Promise.all([
+    fetchLivePrices(state).catch(() => []),
+    (async () => {
+      try {
+        const res = await fetchWithTimeout(FNG_URL, 5000)
+        return res.ok ? parseFearGreed(await res.json()) : null
+      } catch { return null }
+    })(),
+    (async () => {
+      try {
+        const res = await fetchWithTimeout(GAMMA_URL, 5000)
+        if (!res.ok) return []
+        const data = await res.json()
+        const arr = Array.isArray(data) ? data : data?.markets ?? []
+        return topOddsMarkets(arr, 3)
+      } catch { return [] }
+    })(),
+  ])
+  // Tanggal WIB (UTC+7) untuk header digest.
+  const dateLabel = new Date(Date.now() + 7 * 3600 * 1000).toUTCString().slice(0, 16)
+  return formatMorningBrief({ coins, fng, topOdds, dateLabel })
+}
+
 export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(tick(env))
@@ -1011,7 +1403,7 @@ export default {
     const url = new URL(request.url)
     if (request.method === 'GET' && url.pathname === '/health') {
       try {
-        const state = await loadAll(env.ALERTS_KV)
+        const state = await loadAllCached(env.ALERTS_KV) // cache 90 detik + fallback basi (hemat KV)
         return Response.json({
           ok: true,
           lastTick: state.lastTick,
@@ -1120,7 +1512,7 @@ export default {
               if (typeof uid === 'number') {
                 state.processedUpdateIds = [...seen, uid].slice(-50)
               }
-              await handleUpdate(token, state, update)
+              await handleUpdate(token, state, update, env)
               // Simpan hanya bagian yang berubah (meta selalu — processedUpdateIds;
               // alert hanya kalau ada /alert, /alertodds, /remove).
               await saveChanged(env.ALERTS_KV, state, snap)
@@ -1140,10 +1532,31 @@ export default {
     if (request.method === 'POST' && url.pathname === '/stt') {
       return handleStt(request, env)
     }
+    if (request.method === 'OPTIONS' && url.pathname === '/ask') {
+      return new Response(null, { status: 204, headers: askCorsHeaders })
+    }
+    if (request.method === 'POST' && url.pathname === '/ask') {
+      // v8.2 ASK: tanya pasar -> jawaban AI 2 baris dari data live.
+      return handleAsk(request, env)
+    }
+    if (request.method === 'OPTIONS' && url.pathname === '/whales') {
+      return new Response(null, { status: 204, headers: whalesCorsHeaders })
+    }
+    if (request.method === 'GET' && url.pathname === '/whales') {
+      // v8.2 WHALES: trade Polymarket >=$1.000 (proxy data-api v2 /trades).
+      return handleWhales()
+    }
+    if (request.method === 'OPTIONS' && url.pathname === '/fng') {
+      return new Response(null, { status: 204, headers: fngCorsHeaders })
+    }
+    if (request.method === 'GET' && url.pathname === '/fng') {
+      // v8.2 MOOD: Fear & Greed Index (proxy Alternative.me).
+      return handleFng()
+    }
     return Response.json({
       ok: true,
       service: 'polyglance-watcher',
-      usage: 'GET /health — status (incl. webhook); GET /app — dashboard read-only; GET /setwebhook — pasang webhook Telegram ke /webhook (URL tetap); GET /webhookinfo — status webhook live; GET /setupbot — pasang profil bot + menu button (sekali-pakai); GET /botinfo — profil + menu button live; POST /webhook — Telegram webhook; POST /stt — STT fallback proxy (multipart file=WAV, needs GROQ_API_KEY secret)',
+      usage: 'GET /health — status (incl. webhook); GET /app — dashboard read-only; GET /setwebhook — pasang webhook Telegram ke /webhook (URL tetap); GET /webhookinfo — status webhook live; GET /setupbot — pasang profil bot + menu button (sekali-pakai); GET /botinfo — profil + menu button live; POST /webhook — Telegram webhook; POST /stt — STT fallback proxy (multipart file=WAV, needs GROQ_API_KEY secret); POST /ask — ask the market (JSON {question}, needs GROQ_API_KEY secret); GET /whales — big Polymarket crypto trades ($1,000+); GET /fng — Fear & Greed Index',
     })
   },
 }

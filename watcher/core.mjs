@@ -95,6 +95,15 @@ export function parseBotCommand(text) {
     if (!keyword) return null
     return { cmd: 'alertodds', keyword, direction, pct }
   }
+  if (cmd === '/ask') {
+    // /ask <pertanyaan bebas> — dijawab AI 2 baris dari data live.
+    // Prediksi / financial advice ditolak di handler (isAskRefusalNeeded).
+    const question = parts.slice(1).join(' ').trim()
+    if (question.length < 3) return null
+    return { cmd: 'ask', question: question.slice(0, 200) }
+  }
+  if (cmd === '/whales') return { cmd: 'whales' }
+  if (cmd === '/brief') return { cmd: 'brief' }
   return null
 }
 
@@ -105,9 +114,10 @@ export const USAGE_TEXT = {
   alert: 'Price alerts — I\'ll ping you when a coin\'s price crosses your target. Usage: /alert <coin> above|below <price> — Example: /alert btc below 60000 — I\'ll ping you when BTC drops below $60,000. Coins: btc, eth.',
   alertodds: 'Odds alerts — I\'ll ping you when a Polymarket market\'s YES% crosses your threshold. Usage: /alertodds <keyword> above|below <pct> — Example: /alertodds btc dip above 60 — I\'ll ping you when the YES% of the "BTC dip" market rises above 60%.',
   remove: 'Remove one of your alerts — it stops watching that price or market. Usage: /remove <number> — Example: /remove 1 — removes alert #1. See your alerts first with /list.',
+  ask: 'Ask the market — I answer from live prices, odds and Fear & Greed, in 2 lines. Usage: /ask <question> — Example: /ask why is bitcoin down? — I quote live numbers, never predict prices and never give financial advice.',
 }
 
-export const FALLBACK_TEXT = 'PolyGlance alerts — live prices, Polymarket odds, price & odds alerts for your Even G2 glasses. I didn\'t understand that — here\'s what I can do:\n/price — live BTC/ETH/SOL/DOGE/XRP prices\n/odds — top 5 Polymarket crypto odds\n/alert btc below 60000 — price alert\n/alertodds btc dip above 60 — odds alert\n/list — see your alerts\nType /help for the full guide.'
+export const FALLBACK_TEXT = 'PolyGlance alerts — live prices, Polymarket odds, price & odds alerts for your Even G2 glasses. I didn\'t understand that — here\'s what I can do:\n/price — live BTC/ETH/SOL/DOGE/XRP prices\n/odds — top 5 Polymarket crypto odds\n/ask why is bitcoin down? — ask the market (2-line answer from live data)\n/whales — big Polymarket crypto trades ($1,000+)\n/brief — this morning\'s market digest\n/alert btc below 60000 — price alert\n/alertodds btc dip above 60 — odds alert\n/list — see your alerts\nType /help for the full guide.'
 
 /**
  * Arahkan pesan masuk ke perintah atau balasan ramah — TIDAK PERNAH null.
@@ -129,6 +139,7 @@ export function friendlyReply(text) {
     return { usage: USAGE_TEXT.alert }
   }
   if (cmd === '/alertodds') return { usage: USAGE_TEXT.alertodds }
+  if (cmd === '/ask') return { usage: USAGE_TEXT.ask }
   if (cmd === '/remove') return { usage: USAGE_TEXT.remove }
   return { usage: FALLBACK_TEXT }
 }
@@ -281,6 +292,9 @@ export const HELP_TEXT = [
   '/alertodds bitcoin below 40 — alert when a Polymarket YES% drops below 40%',
   '/price — live prices for BTC, ETH, SOL, DOGE & XRP with 24h change',
   '/odds — top 5 Polymarket crypto odds with volume',
+  '/ask why is bitcoin down? — ask the market, answered from live data (2 lines)',
+  '/whales — big Polymarket crypto trades ($1,000+)',
+  '/brief — this morning\'s market digest',
   '/list — your alerts, with current values',
   '/remove 1 — remove alert #1',
   '/health — is the watcher alive?',
@@ -631,4 +645,208 @@ export function formatRemovedReply(removed, kind, remaining) {
     ? `${removed.coin} ${removed.direction} ${fmtUsd(removed.price)}`
     : `ODDS "${removed.question}" YES ${removed.direction} ${removed.threshold}%`
   return `Removed: ${what}\nYou have ${remaining} alert${remaining === 1 ? '' : 's'} left. See them with /list.`
+}
+
+// ---------------------------------------------------------------------------
+// v8.2 — ASK / WHALES / MOOD / Morning Brief + hemat KV.
+// Semua fungsi di bawah murni (data masuk, nilai keluar) — bisa dites di Node.
+// ---------------------------------------------------------------------------
+
+/** Jawaban penolakan ASK — dipakai pre-check Worker DAN system prompt Groq
+  (teksnya sama persis supaya perilaku konsisten di kedua jalur). */
+export const ASK_REFUSAL = 'I can share live data, not predictions or advice.'
+
+/**
+ * Pre-check pertanyaan ASK: true kalau pertanyaan meminta prediksi harga
+ * atau financial advice — harus ditolak TANPA memanggil Groq (hemat kuota
+ * + jawaban deterministik). Pertanyaan faktual ("why is bitcoin down?",
+ * "is bitcoin fear or greed?") lolos — LLM menjawab dari data live.
+ * Aturan: (1) should/shall i|we, (2) kata prediksi/advice, (3) when/best
+ * time + buy/sell, (4) will + kata target harga, (5) buy/sell + koin +
+ * kata "sekarang/baik". */
+export function isAskRefusalNeeded(question) {
+  if (!question || typeof question !== 'string') return false
+  const q = question.toLowerCase()
+  if (/\b(should|shall)\s+(i|we)\b/.test(q)) return true
+  if (/\b(invest|prediction|predict|forecast|advice|recommend)\b/.test(q)) return true
+  if (/\b(when|best time)\b.*\b(buy|sell)\b/.test(q)) return true
+  if (/\bwill\b.*\b(reach|hit|go to|rise to|fall to|drop to|be at)\b/.test(q)) return true
+  if (/\b(buy|sell)\b.*\b(bitcoin|btc|ethereum|eth|solana|sol|crypto)\b/.test(q) && /\b(should|now|today|good)\b/.test(q)) return true
+  return false
+}
+
+/** System prompt Groq chat untuk ASK — jawaban WAJIB dari data live,
+  maks 2 baris pendek, tanpa prediksi / advice. */
+export const ASK_SYSTEM_PROMPT = 'You are PolyGlance, a market-data summarizer on smart glasses. Answer ONLY from the live data below. Max 2 short lines. Quote real numbers from the data. NEVER predict future prices, NEVER give financial advice, NEVER recommend buying or selling. If the question asks for a prediction or advice, reply exactly: "I can share live data, not predictions or advice." If the data does not cover the question, say so in one line. English only, plain ASCII.'
+
+/** Pesan Groq chat untuk ASK: system + user (data live + pertanyaan). */
+export function buildAskMessages(question, dataLines) {
+  const data = (dataLines || []).filter(Boolean).join('\n')
+  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+  return [
+    { role: 'system', content: ASK_SYSTEM_PROMPT },
+    { role: 'user', content: `Live data (UTC ${stamp}):\n${data || 'no live data available'}\n\nQuestion: ${question}` },
+  ]
+}
+
+/** Parse jawaban Groq chat -> maks 2 baris non-kosong, tiap baris <=100
+  karakter (kacamata membungkus ulang ke <=34 karakter/baris sendiri).
+  Return null kalau tidak ada isi (pemanggil menampilkan pesan gagal). */
+export function parseAskAnswer(content) {
+  if (!content || typeof content !== 'string') return null
+  const lines = content.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2)
+  if (lines.length === 0) return null
+  return lines.map((l) => (l.length > 100 ? l.slice(0, 100) : l)).join('\n')
+}
+
+/** Format USD ringkas untuk WHALES: $12.4K · $150K · $1.2M. */
+export function formatWhaleUsd(usd) {
+  if (typeof usd !== 'number' || !Number.isFinite(usd)) return '$?'
+  if (usd >= 1e6) return '$' + (usd / 1e6).toFixed(1) + 'M'
+  if (usd >= 1e4) {
+    const v = (usd / 1e3).toFixed(1)
+    return '$' + (v.endsWith('.0') ? v.slice(0, -2) : v) + 'K'
+  }
+  if (usd >= 1e3) return '$' + (usd / 1e3).toFixed(1) + 'K'
+  return '$' + Math.round(usd)
+}
+
+/**
+ * Parse trade Polymarket data-api v2 /trades -> trade paus crypto.
+ * Filter: nilai (size x price) >= $1.000 DAN pertanyaan mengandung keyword
+ * crypto (regex yang sama dengan topOddsMarkets). Dedupe berdasarkan
+ * transactionHash (fallback: question+timestamp+size). Urut terbaru dulu,
+ * maks 10. Return [{question, outcome, usd, pct, trader, mins}].
+ * Field API defensif (alias): title | market.question | question | slug;
+ * outcome | outcomeIndex (0=Yes, 1=No di pasar biner); name | pseudonym |
+ * maker; timestamp detik ATAU milidetik. */
+export function parseWhaleTrades(trades, nowMs = Date.now()) {
+  if (!Array.isArray(trades)) return []
+  const seen = new Set()
+  const out = []
+  for (const t of trades) {
+    const size = parseFloat(String(t?.size ?? ''))
+    const price = parseFloat(String(t?.price ?? ''))
+    if (!Number.isFinite(size) || !Number.isFinite(price) || size <= 0 || price <= 0) continue
+    const usd = size * price
+    if (usd < 1000) continue
+    const question = String(t?.title ?? t?.market?.question ?? t?.question ?? t?.slug ?? '').trim()
+    if (!question) continue
+    if (!CRYPTO_KEYWORD.test(question)) continue
+    const tx = String(t?.transactionHash ?? t?.transaction_hash ?? '')
+    const key = tx || `${question}|${t?.timestamp}|${size}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    let outcome = String(t?.outcome ?? '').trim().toUpperCase()
+    if (!outcome) outcome = t?.outcomeIndex === 1 ? 'NO' : 'YES'
+    const trader = String(t?.name ?? t?.pseudonym ?? t?.maker ?? '').trim().slice(0, 20) || 'anon'
+    const tsRaw = Number(t?.timestamp)
+    const tsMs = Number.isFinite(tsRaw) ? (tsRaw > 1e12 ? tsRaw : tsRaw * 1000) : nowMs
+    const mins = Math.max(0, Math.round((nowMs - tsMs) / 60000))
+    out.push({
+      question,
+      outcome,
+      usd: Math.round(usd),
+      pct: Math.round(price * 100),
+      trader,
+      mins,
+      _ts: tsMs,
+    })
+  }
+  out.sort((a, b) => b._ts - a._ts)
+  return out.slice(0, 10).map(({ _ts, ...rest }) => rest)
+}
+
+/** Trade paus -> teks Telegram /whales (maks 5 baris trade). */
+export function formatWhalesReply(trades) {
+  if (!trades || trades.length === 0) return 'No big crypto trades ($1,000+) in the last few minutes — try again soon.'
+  const age = (mins) => (mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`)
+  const lines = trades.slice(0, 5).map((t, i) =>
+    `${i + 1}. ${formatWhaleUsd(t.usd)} ${t.outcome} "${t.question}" @ ${t.pct}% — ${t.trader}, ${age(t.mins)}`)
+  return 'Big Polymarket crypto trades ($1,000+):\n' + lines.join('\n')
+}
+
+/**
+ * Level MOOD — cerminan dari src/mood.ts (kacamata). Skor: F&G 0..100 ->
+ * -2..+2; arah BTC -> -1..+1; funding rata-rata -> -1..+1. Total -4..+4:
+ * <=-2 risk-off, -1 cautious, 0 neutral, +1..+2 risk-on, >=+3 euphoric.
+ * Data kosong tidak ikut skor (netral). */
+export function computeMoodLevel({ fng, btcChg, fundingAvg }) {
+  let score = 0
+  if (typeof fng === 'number') {
+    if (fng <= 24) score -= 2
+    else if (fng <= 44) score -= 1
+    else if (fng >= 76) score += 2
+    else if (fng >= 55) score += 1
+  }
+  if (typeof btcChg === 'number') {
+    if (btcChg <= -3) score -= 1
+    else if (btcChg >= 3) score += 1
+  }
+  if (typeof fundingAvg === 'number') {
+    if (fundingAvg <= -0.0005) score -= 1
+    else if (fundingAvg >= 0.001) score += 1
+  }
+  if (score <= -2) return 'risk-off'
+  if (score === -1) return 'cautious'
+  if (score === 0) return 'neutral'
+  if (score <= 2) return 'risk-on'
+  return 'euphoric'
+}
+
+/**
+ * Morning Brief — digest Telegram 08:00 WIB (01:00 UTC), sekali per hari.
+ * coins: [{sym, price, changePct}] (format sama dengan formatPriceReply);
+ * fng: {value, label} | null; topOdds: [{question, yes}] (dari
+ * topOddsMarkets, maks 3). */
+export function formatMorningBrief({ coins, fng, topOdds, dateLabel }) {
+  const lines = [`Morning brief — ${dateLabel || 'today'}:`]
+  if (coins && coins.length) {
+    lines.push(coins.map((c) => {
+      const ch = typeof c.changePct === 'number' ? ` (${c.changePct >= 0 ? '+' : ''}${c.changePct.toFixed(1)}% 24h)` : ''
+      return `${c.sym} ${fmtPrice(c.price)}${ch}`
+    }).join(' · '))
+  }
+  if (fng) lines.push(`Fear & Greed: ${fng.value} (${fng.label})`)
+  if (topOdds && topOdds.length) {
+    lines.push('Top odds:')
+    topOdds.slice(0, 3).forEach((m, i) => lines.push(`${i + 1}. ${m.question} — YES ${m.yes}%`))
+  }
+  lines.push('Open the Mini App from the chat menu for candles & alerts.')
+  return lines.join('\n')
+}
+
+/**
+ * Apakah Morning Brief jatuh tempo SEKARANG? true hanya di jam 01:00 UTC
+ * (08:00 WIB) dan belum dikirim hari ini (lastSentDate = 'YYYY-MM-DD' UTC).
+ * Dipakai tick() — JANGAN panggil di luar jam 01:00 UTC supaya tidak ada
+ * baca KV yang tidak perlu (lihat catatan hemat KV di worker.js). */
+export function briefDue(lastSentDate, nowMs = Date.now()) {
+  const d = new Date(nowMs)
+  if (d.getUTCHours() !== 1) return false
+  const today = d.toISOString().slice(0, 10)
+  return lastSentDate !== today
+}
+
+// ---------------------------------------------------------------------------
+// Hemat KV (v8.2) — akun Cloudflare ilham kena limit KV harian 26 Nov
+// (50% jam 16:27 WIB, 90% jam 22:44 WIB; reset 00:00 UTC). Meter yang
+// kehabisan hampir pasti WRITES (batas gratis 1.000/hari): tick menulis key
+// prices 1x/menit hanya karena lastTick berubah = 1.440 writes/hari, dan
+// kurva akrualnya cocok (570 writes ~09:27 UTC = 50%, 944 ~15:44 UTC = 90%).
+// Perbaikan: tahan penulisan key prices sampai >=10 menit sejak lastTick
+// tersimpan (lihat worker.js tick). Deteksi crossing alert TETAP aman:
+// cek crossing tiap tick memakai harga segar vs harga tersimpan terakhir
+// (jendela deteksi justru melebar, bukan menyempit).
+// ---------------------------------------------------------------------------
+
+/** Jeda minimum antar penulisan key prices (10 menit). */
+export const PRICES_PERSIST_MIN_MS = 10 * 60 * 1000
+
+/** true kalau key prices BOLEH ditulis sekarang (sudah >=10 menit sejak
+  lastTick tersimpan, atau belum pernah tersimpan). */
+export function shouldPersistPrices(prevLastTickIso, nowMs = Date.now()) {
+  const prev = Date.parse(prevLastTickIso || '')
+  if (!Number.isFinite(prev)) return true
+  return nowMs - prev >= PRICES_PERSIST_MIN_MS
 }

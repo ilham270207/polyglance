@@ -1,8 +1,9 @@
-// PolyGlance v8 - 8 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram + HYPERLIQUID
-// v8: view HL — harga perp BTC/ETH/SOL + funding + open interest dari API
-// publik Hyperliquid (read-only, tanpa wallet, tanpa trading).
+// PolyGlance v8.2 - 11 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram + HYPERLIQUID + ASK + WHALES + MOOD
+// v8.2: ASK (tanya pasar pakai suara, dijawab AI 2 baris via Worker /ask) +
+// WHALES (trade Polymarket >=$1.000 via Worker proxy /whales) + MOOD (Fear &
+// Greed gabungan via Worker proxy /fng). Morning Brief jalan di Worker saja.
 // Tap = pindah view (TICKER -> ODDS -> PAPER-BTC -> PAPER-ETH -> ALERTS ->
-// ODDS-ALERT -> HL -> VOICE -> TICKER).
+// ODDS-ALERT -> HL -> VOICE -> ASK -> WHALES -> MOOD -> TICKER).
 // Double-tap = keluar (kecuali di view ALERTS: ganti aset; di view ODDS-ALERT:
 // ganti pasar). Swipe up/down = aksi per view.
 // View VOICE: push-to-talk. Swipe up = mulai dengar, swipe up lagi = stop & kirim
@@ -19,6 +20,9 @@ import {
 import { parseVoiceCommand, rmsLevel, type VoiceAction, type AlertCoin } from './voice'
 import { transcribePcm, getGroqKey, GROQ_KEY_STORAGE } from './stt'
 import { parseHlPerps, fmtFunding, fmtOi, type HlRow } from './hl'
+import { askMarket, wrapAskAnswer, getAskBaseUrl } from './ask'
+import { whaleLines, type WhaleTrade } from './whales'
+import { moodLines } from './mood'
 
 const bridge = await waitForEvenAppBridge()
 
@@ -47,7 +51,7 @@ function truncate(s: string, max: number): string {
 }
 
 // ---------- state ----------
-type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice'
+type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice' | 'ask' | 'whales' | 'mood'
 let view: View = 'ticker'
 
 interface Prices {
@@ -74,6 +78,115 @@ let oddsPage = 0
 // JANGAN pernah mengosongkan view atau mengganggu view lain.
 let hlRows: HlRow[] | null = null
 let hlOffline = false
+
+// ---------- ASK (v8.2) — tanya pasar pakai suara, dijawab AI 2 baris ----------
+// Pertanyaan dikirim ke Worker POST /ask (Groq chat + konteks live server-
+// side). Kacamata TIDAK memanggil Groq langsung. askSeq membatalkan jawaban
+// yang datang terlambat (mis. pengguna sudah pindah view).
+type AskPhase = 'idle' | 'asking' | 'answer'
+let askPhase: AskPhase = 'idle'
+let askQuestion = ''
+let askAnswer = ''
+let askFailed = false
+let askSeq = 0
+
+/** Kirim pertanyaan ke Worker /ask, tampilkan jawaban di view ASK. */
+async function runAsk(question: string): Promise<void> {
+  const seq = ++askSeq
+  view = 'ask'
+  askPhase = 'asking'
+  askQuestion = question
+  askAnswer = ''
+  askFailed = false
+  voicePhase = 'idle'
+  render()
+  const answer = await askMarket(question)
+  if (seq !== askSeq) return // pengguna sudah pindah / bertanya lagi
+  askPhase = 'answer'
+  if (answer === null) {
+    askFailed = true
+    askAnswer = ''
+  } else {
+    askAnswer = answer
+  }
+  render()
+}
+
+/** Isi view ASK (<=8 baris). Jawaban dibungkus ulang ke <=34 karakter/baris
+  di sini (wrapAskAnswer) supaya aturan display tidak pernah dilanggar. */
+function askLines(): string[] {
+  if (askPhase === 'asking') {
+    return [
+      'ASK - thinking...',
+      `"${truncate(askQuestion, 30)}"`,
+      'checking live data...',
+      'tap: whales >',
+    ]
+  }
+  if (askPhase === 'answer') {
+    const lines = ['ASK - answer:']
+    if (askQuestion) lines.push(`"${truncate(askQuestion, 30)}"`)
+    if (askFailed) {
+      lines.push('ASK FAILED - try again')
+    } else {
+      lines.push(...wrapAskAnswer(askAnswer))
+    }
+    lines.push('up: ask again')
+    lines.push('tap: whales >')
+    return lines.slice(0, 8)
+  }
+  return [
+    'ASK - ask the market',
+    'say: why is bitcoin down?',
+    'say: is btc fear or greed?',
+    'up: hold to ask',
+    'tap: whales >',
+  ]
+}
+
+// ---------- WHALES (v8.2) — trade Polymarket >=$1.000 ----------
+// Data dari Worker GET /whales (proxy data-api v2 /trades; CORS v2 belum
+// teruji dari WebView, jadi JANGAN fetch langsung ke data-api dari kacamata).
+let whales: WhaleTrade[] | null = null
+let whalesOffline = false
+let whalesUpdated = ''
+
+async function fetchWhales(): Promise<void> {
+  try {
+    const res = await fetch(`${getAskBaseUrl()}/whales`, { signal: AbortSignal.timeout(8000) })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = (await res.json()) as { trades?: WhaleTrade[]; updatedAt?: string }
+    if (!Array.isArray(data.trades)) throw new Error('bad payload')
+    whales = data.trades
+    whalesOffline = false
+    whalesUpdated = data.updatedAt ? fmtTime(new Date(data.updatedAt)) : ''
+  } catch (err) {
+    console.log('whales fetch failed:', err)
+    whalesOffline = true
+  }
+}
+
+// ---------- MOOD (v8.2) — Fear & Greed gabungan ----------
+// F&G dari Worker GET /fng (proxy Alternative.me); arah harga dari state
+// prices (sudah ada); funding rata-rata dari hlRows (sudah ada).
+let moodFng: number | null = null
+let moodFngLabel = ''
+let moodOffline = false
+
+async function fetchMood(): Promise<void> {
+  try {
+    const res = await fetch(`${getAskBaseUrl()}/fng`, { signal: AbortSignal.timeout(8000) })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = (await res.json()) as { value?: number; label?: string }
+    if (typeof data.value !== 'number') throw new Error('bad payload')
+    moodFng = data.value
+    moodFngLabel = typeof data.label === 'string' ? data.label : ''
+    moodOffline = false
+  } catch (err) {
+    console.log('fng fetch failed:', err)
+    moodOffline = true
+  }
+}
 
 // ---------- paper trade (BTC + ETH, cash bersama) ----------
 const PAPER_KEY_V2 = 'polyglance.paper.v2'
@@ -426,6 +539,12 @@ function handleVoiceTranscript(text: string): void {
     voiceResult(text, 'NOT UNDERSTOOD - try again')
     return
   }
+  // ASK (v8.2): pertanyaan bebas — langsung ke view ASK + Worker /ask,
+  // JANGAN tampilkan hasil dulu di view VOICE (jawabannya butuh waktu).
+  if (action.type === 'ask') {
+    void runAsk(action.question)
+    return
+  }
   const result = executeVoiceAction(action)
   voiceResult(text, result)
   // Perintah pindah view: hasil tampil dulu di view VOICE, baru pindah.
@@ -477,6 +596,10 @@ function executeVoiceAction(action: VoiceAction): string {
       return setOddsAlertTarget(action.threshold, action.direction)
     case 'cancel-odds-alert':
       return cancelOddsAlert()
+    case 'ask':
+      // Tidak pernah sampai sini via handleVoiceTranscript (di-intercept ke
+      // runAsk), tapi switch harus exhaustive.
+      return 'ASKING MARKET...'
   }
 }
 
@@ -591,7 +714,7 @@ function voiceLines(): string[] {
     lines.push(`-> ${truncate(voiceLastResult, 31)}`)
     lines.push('up: listen again')
     lines.push('dn: back to idle')
-    lines.push('tap: ticker >')
+    lines.push('tap: ask >')
     return lines
   }
   // idle
@@ -602,18 +725,18 @@ function voiceLines(): string[] {
       'set key in phone',
       'settings page',
       'up: listen (needs key)',
-      'tap: ticker >',
+      'tap: ask >',
     ]
   }
   return [
     'VOICE - push to talk',
     'say: sell all bitcoin',
-    'say: show portfolio',
-    'say: set odds alert 60',
-    'say: show hyperliquid',
+    'say: why is bitcoin down?',
+    'say: show whales',
+    'say: show mood',
     'up: start listening',
     'dn: back',
-    'tap: ticker >',
+    'tap: ask >',
   ]
 }
 
@@ -681,6 +804,34 @@ function buildContent(): string {
 
   if (view === 'hl') {
     return hlLines().join('\n')
+  }
+
+  if (view === 'ask') {
+    return askLines().join('\n')
+  }
+
+  if (view === 'whales') {
+    return whaleLines(whales, whalesOffline, whalesUpdated).join('\n')
+  }
+
+  if (view === 'mood') {
+    const btcChg = prices ? prices.btcChg : null
+    let topMover: { symbol: string; chg: number } | null = null
+    if (prices) {
+      const all = [
+        { symbol: 'BTC', chg: prices.btcChg },
+        { symbol: 'ETH', chg: prices.ethChg },
+        { symbol: 'SOL', chg: prices.solChg },
+        { symbol: 'DOGE', chg: prices.dogeChg },
+        { symbol: 'XRP', chg: prices.xrpChg },
+      ]
+      topMover = all.reduce((a, b) => (Math.abs(b.chg) > Math.abs(a.chg) ? b : a))
+    }
+    let fundingAvg: number | null = null
+    if (hlRows && hlRows.length > 0) {
+      fundingAvg = hlRows.reduce((s, r) => s + r.funding, 0) / hlRows.length
+    }
+    return moodLines({ fng: moodFng, fngLabel: moodFngLabel, btcChg, topMover, fundingAvg, offline: moodOffline }).join('\n')
   }
 
   // voice
@@ -934,6 +1085,8 @@ async function refreshAll(): Promise<void> {
   await fetchPrices()
   await fetchOdds()
   await fetchHl()
+  await fetchWhales()
+  await fetchMood()
   checkAlert()
   checkOddsAlert()
   render()
@@ -968,9 +1121,13 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
   return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
 }
 
-const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'hl', 'voice']
+const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'hl', 'voice', 'ask', 'whales', 'mood']
 
 function cancelListeningSync(): void {
+  // Batalkan juga jawaban ASK yang masih jalan (askSeq++ membuat runAsk
+  // yang tertunda mengabaikan hasilnya saat kembali).
+  askSeq++
+  if (askPhase === 'asking') askPhase = 'idle'
   // Dipanggil saat pindah view / keluar: matikan mic, buang rekaman.
   if (voicePhase === 'listening' || voicePhase === 'sending') {
     clearVoiceTimer()
@@ -1180,6 +1337,15 @@ function swipeUp(): void {
     if (voicePhase === 'result') { voicePhase = 'idle'; void startListening(); return }
     return
   }
+  if (view === 'ask') {
+    // Tanya lagi pakai suara: pindah ke VOICE + langsung dengar.
+    if (askPhase === 'asking') return
+    view = 'voice'
+    render()
+    void startListening()
+    return
+  }
+  if (view === 'whales' || view === 'mood') { void refreshAll(); return }
   if (view === 'ticker' || view === 'hl') { void refreshAll(); return }
   if (view === 'odds') {
     const pages = Math.max(1, Math.ceil(markets.length / 3))
@@ -1200,6 +1366,8 @@ function swipeDown(): void {
     prevView()
     return
   }
+  if (view === 'ask') { prevView(); return }
+  if (view === 'whales' || view === 'mood') { void refreshAll(); return }
   if (view === 'ticker' || view === 'hl') { void refreshAll(); return }
   if (view === 'odds') {
     const pages = Math.max(1, Math.ceil(markets.length / 3))

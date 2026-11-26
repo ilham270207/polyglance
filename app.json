@@ -7,7 +7,7 @@
   "package_id": "com.ilham270207.polyglance",
   "permissions": [
     {
-      "desc": "Fetch BTC/ETH prices, Polymarket odds and Hyperliquid perps",
+      "desc": "Fetch BTC/ETH prices, Polymarket odds, Hyperliquid perps, Groq STT and Worker proxy for ASK / Whales / Mood",
       "name": "network",
       "whitelist": [
         "https://api.coingecko.com",
@@ -25,5 +25,5 @@
   "supported_languages": [
     "en"
   ],
-  "version": "0.1.0"
+  "version": "8.2.0"
 }
