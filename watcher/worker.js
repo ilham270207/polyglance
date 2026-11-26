@@ -231,11 +231,16 @@ async function fetchCoinData(sym, state) {
   return out
 }
 
-/** Dashboard read-only (GET /app) — TEMA PUTIH, mobile-first, tanpa JS, tanpa secret.
- * Bagian: header status, Fear & Greed, live prices 5 koin + sparkline,
- * top movers, candles (5 koin + timeframe via ?coin=&tf=), top 5 odds +
- * countdown, active alerts kaya, links (TANPA link repo). Kalau satu sumber
- * gagal, bagiannya tampil "unavailable" kecil — halaman lain tetap jalan. */
+/** Dashboard read-only (GET /app) — TEMA PUTIH, mobile-first, tanpa secret.
+ * Satu script kecil di <head>: kalau window.Telegram.WebApp TIDAK ada
+ * (WebView polos = APK), <html> dapat class native-mode → layout gaya
+ * aplikasi Android (app bar + bottom nav, tema gelap). Di dalam Telegram
+ * (WebApp ada) tampilannya PERSIS seperti sebelumnya — semua CSS native
+ * di-scope ke html.native-mode. Bagian: header status, Fear & Greed, live
+ * prices 5 koin + sparkline, top movers, candles (5 koin + timeframe via
+ * ?coin=&tf=), top 5 odds + countdown, active alerts kaya, links (TANPA
+ * link repo). Kalau satu sumber gagal, bagiannya tampil "unavailable"
+ * kecil — halaman lain tetap jalan. */
 async function handleApp(env, url) {
   const state = await loadAll(env.ALERTS_KV)
   const coin = (url.searchParams.get('coin') || 'BTC').toUpperCase()
@@ -366,18 +371,45 @@ h1{color:#059669;margin:0;font-size:26px}h2{color:#059669;font-size:13px;margin:
 ul{margin:0;padding-left:20px}li{margin:8px 0}
 a{color:#059669}.links a{display:inline-block;margin:6px 14px 0 0}
 .meta{color:#9ca3af;font-size:12px;margin-top:18px}
-</style></head><body><div class="wrap">
+.appbar,.bottomnav{display:none}
+html.native-mode body{background:#0f172a;color:#e2e8f0;padding:0 0 78px}
+html.native-mode .wrap{padding:0 16px 8px}
+html.native-mode h1,html.native-mode .sub{display:none}
+html.native-mode .status{color:#94a3b8}
+html.native-mode .card{background:#1e293b;border-color:#334155;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+html.native-mode h2{color:#34d399}
+html.native-mode a{color:#34d399}
+html.native-mode .price{background:#0f172a;border-color:#334155}
+html.native-mode .sym,html.native-mode .pval{color:#f1f5f9}
+html.native-mode .hl{color:#94a3b8}
+html.native-mode .tab{border-color:#475569;color:#cbd5e1}
+html.native-mode .tab.active{background:#059669;border-color:#059669;color:#fff}
+html.native-mode .chart{border-color:#334155;background:#0f172a}
+html.native-mode .ohlc{color:#94a3b8}
+html.native-mode .odds-line{color:#94a3b8}
+html.native-mode .muted{color:#64748b}
+html.native-mode .meta{color:#64748b}
+html.native-mode .appbar{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:20;background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 16px}
+html.native-mode .appbar-logo{width:38px;height:38px;border-radius:11px;background:#000;display:flex;align-items:center;justify-content:center;flex:none}
+html.native-mode .appbar-text{display:flex;flex-direction:column}
+html.native-mode .appbar-title{font-size:18px;font-weight:800;color:#f8fafc;line-height:1.15}
+html.native-mode .appbar-sub{font-size:11px;color:#94a3b8}
+html.native-mode .bottomnav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:20;background:#1e293b;border-top:1px solid #334155;padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+html.native-mode .bottomnav a{flex:1;text-align:center;text-decoration:none;color:#94a3b8;font-size:11px;font-weight:600;padding:4px 0 2px}
+html.native-mode .bottomnav a svg{display:block;margin:0 auto 2px}
+html.native-mode .bottomnav a:focus{color:#34d399}
+</style><script>try{if(!(window.Telegram&&window.Telegram.WebApp)){document.documentElement.className+=' native-mode';}}catch(e){}</script></head><body><header class="appbar"><span class="appbar-logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="8.5" width="7.5" height="6" rx="2.5"/><rect x="14" y="8.5" width="7.5" height="6" rx="2.5"/><path d="M10 11.5h4"/></svg></span><span class="appbar-text"><span class="appbar-title">PolyGlance</span><span class="appbar-sub">Even Realities G2 · Android</span></span></header><div class="wrap">
 <h1>PolyGlance</h1><p class="sub">Crypto at a glance — Even Realities G2</p>
 <p class="status">${esc(headerStatus)}</p>
 <div class="card"><h2 style="margin-top:0">Fear &amp; Greed Index</h2>${fngHtml}</div>
-<div class="card"><h2 style="margin-top:0">Live prices</h2>${priceHtml}</div>
+<div class="card" id="sec-prices"><h2 style="margin-top:0">Live prices</h2>${priceHtml}</div>
 <div class="card"><h2 style="margin-top:0">Top movers · 24h</h2>${moversHtml}</div>
 <div class="card"><h2 style="margin-top:0">Candles · ${selCoin} · ${tf}</h2><div class="tabs">${coinTabs}</div><div class="tabs">${tfTabs}</div>${candleHtml}</div>
-<div class="card"><h2 style="margin-top:0">Top Polymarket odds</h2>${oddsHtml}</div>
-<div class="card"><h2 style="margin-top:0">Active alerts (${allAlerts.length})</h2>${alertsHtml}</div>
-<h2>Links</h2><div class="links"><a href="${BUILD_URL}">DoraHacks Build 51900</a><a href="${VIDEO_URL}">Demo video</a><a href="https://t.me/polyglance_alerts_bot">Telegram bot</a></div>
+<div class="card" id="sec-odds"><h2 style="margin-top:0">Top Polymarket odds</h2>${oddsHtml}</div>
+<div class="card" id="sec-alerts"><h2 style="margin-top:0">Active alerts (${allAlerts.length})</h2>${alertsHtml}</div>
+<div id="sec-more"><h2>Links</h2><div class="links"><a href="${BUILD_URL}">DoraHacks Build 51900</a><a href="${VIDEO_URL}">Demo video</a><a href="https://t.me/polyglance_alerts_bot">Telegram bot</a></div></div>
 <p class="meta">Read-only dashboard · Refreshes every 60s · Set or remove alerts from the bot, not here.</p>
-</div></body></html>`
+</div><nav class="bottomnav"><a href="#sec-prices"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 20v-5M12 20V7M18 20v-8M3 20h18"/></svg>Prices</a><a href="#sec-odds"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-7 7"/></svg>Odds</a><a href="#sec-alerts"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>Alerts</a><a href="#sec-more"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>More</a></nav></body></html>`
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
 }
 
