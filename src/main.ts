@@ -149,6 +149,7 @@ function askLines(): string[] {
 // teruji dari WebView, jadi JANGAN fetch langsung ke data-api dari kacamata).
 let whales: WhaleTrade[] | null = null
 let whalesOffline = false
+let whalesLoaded = false
 let whalesUpdated = ''
 
 async function fetchWhales(): Promise<void> {
@@ -159,6 +160,7 @@ async function fetchWhales(): Promise<void> {
     if (!Array.isArray(data.trades)) throw new Error('bad payload')
     whales = data.trades
     whalesOffline = false
+    whalesLoaded = true
     whalesUpdated = data.updatedAt ? fmtTime(new Date(data.updatedAt)) : ''
   } catch (err) {
     console.log('whales fetch failed:', err)
@@ -811,7 +813,7 @@ function buildContent(): string {
   }
 
   if (view === 'whales') {
-    return whaleLines(whales, whalesOffline, whalesUpdated).join('\n')
+    return whaleLines(whales, whalesOffline, whalesUpdated, whalesLoaded).join('\n')
   }
 
   if (view === 'mood') {

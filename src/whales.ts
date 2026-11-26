@@ -45,11 +45,14 @@ export function whaleTradeLines(t: WhaleTrade): [string, string] {
   return [line1.slice(0, 34), line2.slice(0, 34)]
 }
 
-/** Baris lengkap view WHALES (<=8 baris): header + sampai 3 trade + footer. */
-export function whaleLines(trades: WhaleTrade[] | null, offline: boolean, updated: string): string[] {
+/** Baris lengkap view WHALES (<=8 baris): header + sampai 3 trade + footer.
+  `loaded` = fetch /whales sudah selesai (walau 0 trade): kalau loaded tapi
+  kosong, tampilkan "no whales right now" — BUKAN "loading whales..."
+  (yang hanya benar sebelum fetch pertama selesai). */
+export function whaleLines(trades: WhaleTrade[] | null, offline: boolean, updated: string, loaded = false): string[] {
   const lines: string[] = ['WHALES - BIG POLYMARKET BETS']
   if (!trades || trades.length === 0) {
-    lines.push(offline ? 'OFFLINE - no data yet' : 'loading whales...')
+    lines.push(offline ? 'OFFLINE - no data yet' : loaded ? 'no whales right now' : 'loading whales...')
     lines.push('tap: mood >')
     return lines
   }
