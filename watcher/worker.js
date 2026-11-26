@@ -76,7 +76,7 @@ const KEY_BRIEF = 'polyglance-brief-v1' // {lastSentDate: 'YYYY-MM-DD'} — guar
 // (1 baca KV di jam 01:00 UTC + 1 tulis/hari — lihat tick §1d).
 // /ask + /whales + /fng pakai cache in-memory saja (bukan KV).
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const GROQ_CHAT_MODEL = 'llama-3.3-70b-versatile'
+const GROQ_CHAT_MODEL = 'qwen/qwen3.8-27b'
 const ASK_TIMEOUT_MS = 15000
 const WHALES_TRADES_URL = 'https://data-api.polymarket.com/v2/trades?limit=100'
 const WHALES_CACHE_MS = 45 * 1000 // trade paus bergerak cepat — cache pendek
@@ -1252,7 +1252,7 @@ async function askLiveContext() {
 }
 
 /**
- * Satu pertanyaan ASK -> Groq chat (llama-3.3-70b-versatile).
+ * Satu pertanyaan ASK -> Groq chat (qwen/qwen3.8-27b — llama-3.3-70b-versatile ditarik Groq, 404; gpt-oss-20b flaky/kosong).
  * Return {answer} | {answer: ASK_REFUSAL, refused:true} | {error}.
  * Pre-check penolakan dulu (tanpa Groq — hemat kuota + deterministik);
  * batas in-memory 60 pertanyaan/menit per isolate (anti-spam publik).
