@@ -280,7 +280,7 @@ console.log('10. /app dashboard')
     oddsAlerts: [{ chatId: 999, keyword: 'btc dip', question: 'Will Bitcoin dip below $55,000?', threshold: 60, direction: 'above', fired: false, lastYes: 47, createdAt: 'x' }],
   })
   gammaMarkets = [
-    { question: 'Will Bitcoin dip below $55,000?', outcomes: '["Yes","No"]', outcomePrices: '["0.47","0.53"]', volume24hr: '1000', slug: 'bitcoin-dip-55000', endDate: '2026-12-01T00:00:00Z' },
+    { question: 'Will Bitcoin dip below $55,000?', outcomes: '["Yes","No"]', outcomePrices: '["0.47","0.53"]', volume24hr: '1000', slug: 'bitcoin-dip-55000', events: [{ slug: 'bitcoin-dip-event' }], endDate: '2026-12-01T00:00:00Z' },
     { question: 'Will Ethereum reach $2,000?', outcomes: '["Yes","No"]', outcomePrices: '["0.62","0.38"]', volume24hr: '500', slug: 'ethereum-2000', endDate: '2026-12-31T00:00:00Z' },
   ]
   const res = await worker.fetch(new Request(`${BASE}/app`), env(kv), makeCtx())
@@ -299,7 +299,8 @@ console.log('10. /app dashboard')
   check('odds tampil', html.includes('YES 47%') && html.includes('YES 62%'))
   check('odds countdown tampil', html.includes('closes in'))
   check('odds link tampil pendek', html.includes('>View on Polymarket ↗</a>') && !html.includes('>polymarket.com/event/'))
-  check('odds link href lengkap tetap', html.includes('href="https://polymarket.com/event/bitcoin-dip-55000"'))
+  check('odds link href lengkap tetap', html.includes('href="https://polymarket.com/event/bitcoin-dip-event/bitcoin-dip-55000"'))
+  check('odds link TIDAK pakai /event/<market-slug> saja', !html.includes('href="https://polymarket.com/event/bitcoin-dip-55000"'))
   check('price alert tampil + jarak', html.includes('BTC below $60,000') && html.includes('above the $60,000 threshold'))
   check('odds alert tampil', html.includes('YES above 60%'))
   check('link repo TIDAK tampil', !html.includes('github.com') && !html.includes('GitHub repo'))
@@ -482,7 +483,7 @@ console.log('19. rich replies /odds /list /alert /alertodds /remove')
     return JSON.parse(sent[sent.length - 1].body).text
   }
   gammaMarkets = [
-    { question: 'Will Bitcoin dip to $55,000 in November?', outcomes: '["Yes","No"]', outcomePrices: '["0.48","0.52"]', volume24hr: '1200000', slug: 'bitcoin-dip-november', endDate: '2026-12-01T00:00:00Z' },
+    { question: 'Will Bitcoin dip to $55,000 in November?', outcomes: '["Yes","No"]', outcomePrices: '["0.48","0.52"]', volume24hr: '1200000', slug: 'bitcoin-dip-november', events: [{ slug: 'bitcoin-price-november' }], endDate: '2026-12-01T00:00:00Z' },
     { question: 'Will Ethereum reach $2,000 by Dec?', outcomes: '["Yes","No"]', outcomePrices: '["0.07","0.93"]', volume24hr: '900000', slug: 'ethereum-2000-dec', endDate: '2026-12-31T00:00:00Z' },
     { question: 'Will Solana reach $100?', outcomes: '["Yes","No"]', outcomePrices: '["0.35","0.65"]', volume24hr: '800000', slug: 'solana-100', endDate: '2026-12-15T00:00:00Z' },
     { question: 'Will Bitcoin hit $70,000?', outcomes: '["Yes","No"]', outcomePrices: '["0.22","0.78"]', volume24hr: '700000', slug: 'bitcoin-70000', endDate: '2026-12-20T00:00:00Z' },
@@ -491,7 +492,7 @@ console.log('19. rich replies /odds /list /alert /alertodds /remove')
   ]
   const o = await post(3001, '/odds')
   check('/odds top 5', o.includes('Top 5 Polymarket crypto odds') && o.includes('Will Bitcoin dip to $55,000 in November?') && o.includes('Will XRP reach $1.50?'), JSON.stringify(o))
-  check('/odds volume + countdown + link', o.includes('vol $1.2M') && o.includes('closes in') && o.includes('polymarket.com/event/bitcoin-dip-november'), JSON.stringify(o))
+  check('/odds volume + countdown + link', o.includes('vol $1.2M') && o.includes('closes in') && o.includes('polymarket.com/event/bitcoin-price-november/bitcoin-dip-november'), JSON.stringify(o))
   check('/odds market ke-6 tidak tampil', !o.includes('Will Dogecoin reach $0.10?'), JSON.stringify(o))
   const a = await post(3002, '/alert eth below 1900')
   check('/alert konfirmasi kaya', a.includes('Alert set: ETH below $1,900') && a.includes('Now: ETH $1,700') && a.includes("I'll ping you when ETH crosses below $1,900"), JSON.stringify(a))

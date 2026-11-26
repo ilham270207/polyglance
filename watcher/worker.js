@@ -285,7 +285,7 @@ async function handleApp(env, url) {
   // Top 5 odds + countdown
   const topOdds = topOddsMarkets(gammaArr, 5)
   const oddsHtml = topOdds.length
-    ? `<ul>${topOdds.map((m) => `<li><b>${esc(m.question)}</b><br><span class="odds-line">YES ${m.yes}% · vol ${fmtVolume(m.vol)}${m.countdown ? ` · ${esc(m.countdown)}` : ''}</span>${m.slug ? `<br><a href="https://polymarket.com/event/${esc(m.slug)}">View on Polymarket ↗</a>` : ''}</li>`).join('')}</ul>`
+    ? `<ul>${topOdds.map((m) => `<li><b>${esc(m.question)}</b><br><span class="odds-line">YES ${m.yes}% · vol ${fmtVolume(m.vol)}${m.countdown ? ` · ${esc(m.countdown)}` : ''}</span>${m.url ? `<br><a href="${esc(m.url)}">View on Polymarket ↗</a>` : ''}</li>`).join('')}</ul>`
     : '<p class="muted">Odds unavailable right now.</p>'
 
   // Active alerts kaya (tanpa chatId) — jarak ke ambang + status

@@ -85,7 +85,7 @@ eq(r.fired.length, 0, 'tanpa prev price jangan fire')
 
 // odds formatting (rich: question lengkap + YES% + volume + link + countdown)
 const gamma = [
-  { question: 'Will Bitcoin dip to $55,000 in November?', outcomes: '["Yes","No"]', outcomePrices: '["0.48","0.52"]', volume24hr: '1000', slug: 'bitcoin-dip-november', endDate: '2026-12-01T00:00:00Z' },
+  { question: 'Will Bitcoin dip to $55,000 in November?', outcomes: '["Yes","No"]', outcomePrices: '["0.48","0.52"]', volume24hr: '1000', slug: 'bitcoin-dip-november', events: [{ slug: 'bitcoin-price-november' }], endDate: '2026-12-01T00:00:00Z' },
   { question: 'Will Ethereum reach $2,000 by Dec?', outcomes: '["Yes","No"]', outcomePrices: '["0.07","0.93"]', volume24hr: '900', slug: 'ethereum-2000-dec', endDate: '2026-12-31T00:00:00Z' },
   { question: 'Will the weather be nice?', outcomes: '["Yes","No"]', outcomePrices: '["0.5","0.5"]', volume24hr: '5000', slug: 'weather-nice', endDate: '2026-11-30T00:00:00Z' },
 ]
@@ -95,10 +95,12 @@ eq(lines[0].includes('Will Bitcoin dip to $55,000 in November?'), true, 'odds ri
 eq(lines[0].includes('YES 48%'), true, 'odds rich yes pct 48')
 eq(lines[0].includes('vol $1K'), true, 'odds rich volume')
 eq(lines[0].includes('closes in 4d'), true, 'odds rich countdown')
-eq(lines[0].includes('polymarket.com/event/bitcoin-dip-november'), true, 'odds rich link')
+eq(lines[0].includes('polymarket.com/event/bitcoin-price-november/bitcoin-dip-november'), true, 'odds rich link kanonis event/market')
 const top5 = topOddsMarkets(gamma, 5, Date.parse('2026-11-26T12:00:00Z'))
 eq(top5.length, 3, 'topOddsMarkets semua (kurang dari 5)')
 eq(top5[0].question, 'Will the weather be nice?', 'topOddsMarkets urut volume')
+eq(top5[1].url, 'https://polymarket.com/event/bitcoin-price-november/bitcoin-dip-november', 'odds url kanonis event/market')
+eq(top5[2].url, 'https://polymarket.com/event/ethereum-2000-dec', 'odds url fallback tanpa events')
 
 // --- /alertodds (v7) ---
 eq(parseBotCommand('/alertodds btc dip above 60'), { cmd: 'alertodds', keyword: 'btc dip', direction: 'above', pct: 60 }, '/alertodds btc dip above 60')

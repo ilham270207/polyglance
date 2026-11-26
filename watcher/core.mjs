@@ -451,13 +451,25 @@ export function sparklineSvg(values, { width = 96, height = 28 } = {}) {
 export function topOddsMarkets(markets, n = 5, nowMs = Date.now()) {
   if (!Array.isArray(markets)) return []
   const parsed = markets
-    .map((m) => ({
-      question: String(m?.question ?? ''),
-      yes: yesPct(m?.outcomes, m?.outcomePrices),
-      vol: parseFloat(String(m?.volume24hr ?? '0')),
-      slug: String(m?.slug ?? ''),
-      countdown: fmtCountdown(m?.endDate, nowMs),
-    }))
+    .map((m) => {
+      const slug = String(m?.slug ?? '')
+      const eventSlug = String(m?.events?.[0]?.slug ?? '')
+      return {
+        question: String(m?.question ?? ''),
+        yes: yesPct(m?.outcomes, m?.outcomePrices),
+        vol: parseFloat(String(m?.volume24hr ?? '0')),
+        slug,
+        eventSlug,
+        // URL kanonis Polymarket: /event/<event-slug>/<market-slug>.
+        // /event/<market-slug> saja = soft 404 (HTTP 200 tapi "Page not found"):
+        // market slug BUKAN event slug (mis. event "what-price-will-bitcoin-hit-before-2027"
+        // vs market "...-2026-527-627-868-...").
+        url: slug
+          ? (eventSlug ? `https://polymarket.com/event/${eventSlug}/${slug}` : `https://polymarket.com/event/${slug}`)
+          : '',
+        countdown: fmtCountdown(m?.endDate, nowMs),
+      }
+    })
     .filter((m) => m.question.length > 0)
     .sort((a, b) => b.vol - a.vol)
   const crypto = parsed.filter((m) => CRYPTO_KEYWORD.test(m.question))
@@ -471,7 +483,7 @@ export function formatOddsRich(markets, n = 5, nowMs = Date.now()) {
       `${i + 1}. ${m.question}`,
       `   YES ${m.yes}% · vol ${fmtVolume(m.vol)}` + (m.countdown ? ` · ${m.countdown}` : ''),
     ]
-    if (m.slug) lines.push(`   polymarket.com/event/${m.slug}`)
+    if (m.url) lines.push(`   ${m.url.replace(/^https:\/\//, '')}`)
     return lines.join('\n')
   })
 }
