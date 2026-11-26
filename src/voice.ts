@@ -5,7 +5,7 @@
 
 export type Coin = 'BTC' | 'ETH'
 export type AlertCoin = 'BTC' | 'ETH' | 'SOL'
-export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'voice'
+export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'voice'
 
 export type VoiceAction =
   | { type: 'goto'; view: VoiceView }
@@ -16,6 +16,8 @@ export type VoiceAction =
   | { type: 'sell-all'; coin: Coin | 'ALL' }
   | { type: 'set-alert'; target: number; coin?: AlertCoin }
   | { type: 'cancel-alert' }
+  | { type: 'set-odds-alert'; threshold: number; direction: 'above' | 'below' }
+  | { type: 'cancel-odds-alert' }
   | { type: 'refresh' }
   | { type: 'stop' }
 
@@ -93,6 +95,26 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
   const tokens = normalize(text)
   if (tokens.length === 0) return null
   const has = (...words: string[]): boolean => words.some((w) => tokens.includes(w))
+
+  // ODDS ALERT — dicek PALING DULU, sebelum cabang alert harga, karena
+  // "set odds alert above 60" mengandung kata 'alert' dan angka.
+  // "set odds alert above 60" / "odds alert below 40" / "set odds alert 60"
+  // (tanpa arah = above). Berlaku untuk pasar yang sedang dipilih di view
+  // ODDS-ALERT (atau pasar teratas kalau belum ada). Ambang 5..95%.
+  // "cancel odds alert" / "remove odds alert" — hapus odds alert.
+  if (has('odds') && has('alert', 'alerts')) {
+    if (has('cancel', 'remove', 'delete', 'clear')) {
+      return { type: 'cancel-odds-alert' }
+    }
+    const pct = extractNumber(tokens)
+    if (pct !== null) {
+      if (pct < 5 || pct > 95) return null
+      const direction = has('below', 'under') ? 'below' : 'above'
+      return { type: 'set-odds-alert', threshold: pct, direction }
+    }
+    // "odds alert" tanpa angka = pindah ke view ODDS-ALERT.
+    return { type: 'goto', view: 'odds-alert' }
+  }
 
   // Hapus alert AKTIF — dicek DULU sebelum 'stop' generik, karena
   // "cancel alert" mengandung kata 'cancel'.

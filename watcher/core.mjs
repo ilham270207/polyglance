@@ -49,6 +49,20 @@ export function parseBotCommand(text) {
     if (!coin || !direction || !Number.isFinite(price) || price <= 0) return null
     return { cmd: 'alert', coin, direction, price }
   }
+  if (cmd === '/alertodds') {
+    // /alertodds <keyword...> above|below <pct> — mis. /alertodds btc dip above 60
+    // /alertodds bitcoin below 40. Keyword = semua kata sebelum arah.
+    const dirs = ['above', 'over', '>', 'below', 'under', '<']
+    const di = parts.findIndex((p) => dirs.includes(p.toLowerCase()))
+    if (di < 2) return null
+    const dirRaw = parts[di].toLowerCase()
+    const direction = dirRaw === 'above' || dirRaw === 'over' || dirRaw === '>' ? 'above' : 'below'
+    const pct = parseFloat(String(parts[di + 1] || '').replace(/[%]/g, ''))
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return null
+    const keyword = parts.slice(1, di).join(' ').trim()
+    if (!keyword) return null
+    return { cmd: 'alertodds', keyword, direction, pct }
+  }
   return null
 }
 
@@ -86,6 +100,72 @@ export function checkAlertCrossings(alerts, prevPrices, newPrices) {
 }
 
 const CRYPTO_KEYWORD = /\b(bitcoin|btc|ethereum|eth|crypto|solana)\b/i
+
+/**
+ * Cari satu market Polymarket dari array mentah Gamma berdasarkan keyword.
+ * Semua kata keyword harus muncul di question (case-insensitive); kalau
+ * beberapa cocok, pilih volume24hr terbesar. Return {question, yes} atau null.
+ */
+export function findOddsMarket(markets, keyword) {
+  if (!Array.isArray(markets) || !keyword || typeof keyword !== 'string') return null
+  const words = keyword.toLowerCase().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return null
+  const parsed = markets
+    .map((m) => ({
+      question: String(m?.question ?? ''),
+      yes: yesPct(m?.outcomes, m?.outcomePrices),
+      vol: parseFloat(String(m?.volume24hr ?? '0')),
+    }))
+    .filter((m) => m.question.length > 0)
+    .filter((m) => words.every((w) => m.question.toLowerCase().includes(w)))
+    .sort((a, b) => b.vol - a.vol)
+  return parsed.length ? { question: parsed[0].question, yes: parsed[0].yes } : null
+}
+
+/** Peta question -> YES% dari array mentah Gamma (untuk cek odds alert). */
+export function oddsYesByQuestion(markets) {
+  const out = {}
+  if (!Array.isArray(markets)) return out
+  for (const m of markets) {
+    const q = String(m?.question ?? '')
+    if (q.length > 0) out[q] = yesPct(m?.outcomes, m?.outcomePrices)
+  }
+  return out
+}
+
+/**
+ * Cek crossing odds alert terhadap YES% baru.
+ * oddsAlerts: [{chatId, keyword, question, threshold, direction, fired}]
+ * prevOdds / newOdds: {question: yesPct} — prev dari tick sebelumnya.
+ * Sekali per crossing (seperti price alert): setelah fire, fired=true
+ * sampai YES kembali ke sisi lain. Alert yang pasarnya tidak ditemukan
+ * di data baru dilewati (tidak fire, tidak reset).
+ * Return { fired: [{alert, yes}], alerts } (alerts = daftar ter-update).
+ */
+export function checkOddsAlertCrossings(oddsAlerts, prevOdds, newOdds) {
+  const fired = []
+  const updated = (oddsAlerts || []).map((a) => {
+    const prev = prevOdds?.[a.question]
+    const now = newOdds?.[a.question]
+    if (typeof prev !== 'number' || typeof now !== 'number') return a
+    const target = a.threshold
+    if (a.direction === 'above') {
+      if (!a.fired && prev < target && now >= target) {
+        fired.push({ alert: a, yes: now })
+        return { ...a, fired: true }
+      }
+      if (a.fired && now < target) return { ...a, fired: false }
+    } else {
+      if (!a.fired && prev > target && now <= target) {
+        fired.push({ alert: a, yes: now })
+        return { ...a, fired: true }
+      }
+      if (a.fired && now > target) return { ...a, fired: false }
+    }
+    return a
+  })
+  return { fired, alerts: updated }
+}
 
 function yesPct(outcomes, prices) {
   const parse = (v) => {
@@ -126,6 +206,8 @@ export const HELP_TEXT = [
   '',
   '/alert btc above 58000 — alert when BTC crosses $58,000',
   '/alert eth below 1900 — alert when ETH drops below $1,900',
+  '/alertodds btc dip above 60 — alert when a Polymarket YES% crosses 60%',
+  '/alertodds bitcoin below 40 — alert when a Polymarket YES% drops below 40%',
   '/price — current BTC/ETH price',
   '/odds — top 3 Polymarket crypto odds',
   '/list — your alerts',

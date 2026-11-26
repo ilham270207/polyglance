@@ -1,9 +1,15 @@
-// PolyGlance v6 - 6 view + paper trade BTC/ETH + price alert + VOICE + Telegram
+// PolyGlance v7 - 7 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram
 // v6: ALERTS multi-aset (BTC/ETH/SOL, ganti aset = double-tap di view ALERTS),
 // TICKER 5 koin (BTC/ETH/SOL/DOGE/XRP), perintah suara baru (sell all,
 // show/check portfolio, cancel/remove alert).
-// Tap = pindah view (TICKER -> ODDS -> PAPER-BTC -> PAPER-ETH -> ALERTS -> VOICE -> TICKER).
-// Double-tap = keluar (kecuali di view ALERTS: ganti aset). Swipe up/down = aksi per view.
+// v7: ODDS ALERT — alarm saat YES% sebuah market Polymarket melewati ambang.
+// View ODDS-ALERT: swipe up/down geser ambang +-5% (swipe pertama dari OFF:
+// up = di atas YES sekarang, down = di bawah YES sekarang), double-tap =
+// ganti pasar. Satu odds alert aktif (terakhir diset yang menang).
+// Tap = pindah view (TICKER -> ODDS -> PAPER-BTC -> PAPER-ETH -> ALERTS ->
+// ODDS-ALERT -> VOICE -> TICKER).
+// Double-tap = keluar (kecuali di view ALERTS: ganti aset; di view ODDS-ALERT:
+// ganti pasar). Swipe up/down = aksi per view.
 // View VOICE: push-to-talk. Swipe up = mulai dengar, swipe up lagi = stop & kirim
 // ke Groq Whisper (key dari localStorage, diisi lewat halaman settings di HP).
 // Semua teks ASCII saja. Satu container 576x288, isEventCapture: 1.
@@ -45,7 +51,7 @@ function truncate(s: string, max: number): string {
 }
 
 // ---------- state ----------
-type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'voice'
+type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'voice'
 let view: View = 'ticker'
 
 interface Prices {
@@ -209,6 +215,84 @@ function cycleAlertAsset(): void {
 
 let transientMsg = ''
 let transientTimer: ReturnType<typeof setTimeout> | null = null
+
+// ---------- odds alert (Polymarket YES% threshold, v7) ----------
+// Satu odds alert aktif (terakhir diset yang menang). Tidak ada target
+// default: threshold 0 = tidak ada alert — tidak ada yang dibuat diam-diam,
+// jadi alert yang sengaja di-cancel TIDAK PERNAH hidup lagi sendiri.
+// Identitas pasar = question lengkap (urutan daftar berubah mengikuti
+// volume, jadi index saja tidak bisa diandalkan).
+const ODDS_ALERT_KEY = 'polyglance.odds-alert.v1'
+const ODDS_ALERT_STEP = 5
+type OddsDirection = 'above' | 'below'
+interface OddsAlertState {
+  question: string
+  threshold: number // 0 = tidak ada alert
+  direction: OddsDirection | null
+  armed: boolean
+  triggered: boolean
+  lastYes: number
+}
+
+function blankOddsAlert(): OddsAlertState {
+  return { question: '', threshold: 0, direction: null, armed: false, triggered: false, lastYes: 0 }
+}
+
+function loadOddsAlert(): OddsAlertState {
+  try {
+    const raw = localStorage.getItem(ODDS_ALERT_KEY)
+    if (raw) {
+      const o = JSON.parse(raw) as Partial<OddsAlertState>
+      if (typeof o.question === 'string' && typeof o.threshold === 'number') {
+        return {
+          question: o.question,
+          threshold: o.threshold >= 5 && o.threshold <= 95 ? o.threshold : 0,
+          direction: o.direction === 'above' || o.direction === 'below' ? o.direction : null,
+          armed: o.armed === true && o.threshold >= 5 && o.threshold <= 95,
+          triggered: o.triggered === true,
+          lastYes: typeof o.lastYes === 'number' ? o.lastYes : 0,
+        }
+      }
+    }
+  } catch {
+    // abaikan - mulai tanpa alert
+  }
+  return blankOddsAlert()
+}
+
+let oddsAlert: OddsAlertState = loadOddsAlert()
+
+function saveOddsAlert(): void {
+  try {
+    localStorage.setItem(ODDS_ALERT_KEY, JSON.stringify(oddsAlert))
+  } catch {
+    // abaikan
+  }
+}
+
+// Index pasar yang dipilih di view ODDS-ALERT (in-memory saja).
+// Sekali saat data pertama masuk, diarahkan ke pasar alert tersimpan
+// (kalau masih ada di daftar) supaya view membuka pasar yang di-alert.
+// Setelah itu index sepenuhnya milik pengguna (double-tap) — refresh
+// berikutnya TIDAK boleh menariknya kembali ke pasar tersimpan.
+let oddsAlertIdx = 0
+let oddsAlertIdxSynced = false
+
+/** Pasar yang sedang dipilih di view ODDS-ALERT: markets[oddsAlertIdx]. */
+function selectedOddsMarket(): Market | null {
+  if (markets.length === 0) return null
+  return markets[Math.min(oddsAlertIdx, markets.length - 1)] ?? null
+}
+
+/** Ganti pasar yang dipilih (double-tap di view ODDS-ALERT). Alert yang
+  tersimpan TIDAK dihapus — view hanya menampilkan pasar lain; alert lama
+  tetap hidup sampai diganti/dibatalkan. */
+function cycleOddsMarket(): void {
+  if (markets.length === 0) return
+  oddsAlertIdxSynced = true
+  oddsAlertIdx = (oddsAlertIdx + 1) % markets.length
+  render()
+}
 
 function showTransient(msg: string): void {
   transientMsg = msg
@@ -386,6 +470,10 @@ function executeVoiceAction(action: VoiceAction): string {
       return setAlertTarget(action.target, action.coin)
     case 'cancel-alert':
       return cancelActiveAlert()
+    case 'set-odds-alert':
+      return setOddsAlertTarget(action.threshold, action.direction)
+    case 'cancel-odds-alert':
+      return cancelOddsAlert()
   }
 }
 
@@ -427,6 +515,28 @@ function shortOddsLabel(question: string, yesPct: number): string {
   const tail = q.replace(/^Will\s+/i, '')
   const label = `${truncate(tail, 22)} YES ${yesPct}%`
   return label.length <= 34 ? label : `${truncate(tail, 20)} YES ${yesPct}%`
+}
+
+/** Label pasar TANPA angka YES% — dipakai view ODDS-ALERT (YES% punya baris
+  sendiri). "Will Bitcoin dip to $55,000 in November?" -> "BTC dip $55,000?" */
+function shortOddsQuestion(question: string): string {
+  const q = question.trim()
+  let sym = ''
+  for (const [re, s] of ASSET_SYM) {
+    if (re.test(q)) { sym = s; break }
+  }
+  const amt = q.match(/\$[\d,]+(?:\.\d+)?/)
+  const verb = /\b(dip|fall|drop|below|under)\b/i.test(q)
+    ? 'dip'
+    : /\b(reach|rise|exceed|above|over|hit)\b/i.test(q)
+      ? 'reach'
+      : 'hit'
+  if (sym && amt) {
+    const label = `${sym} ${verb} ${amt[0]}?`
+    if (label.length <= 34) return label
+  }
+  const tail = q.replace(/^Will\s+/i, '')
+  return truncate(tail, 34)
 }
 
 // ---------- render ----------
@@ -496,9 +606,9 @@ function voiceLines(): string[] {
     'VOICE - push to talk',
     'say: sell all bitcoin',
     'say: show portfolio',
-    'say: cancel alert',
+    'say: set odds alert 60',
     'up: start listening',
-    'dn: back to alerts',
+    'dn: back',
     'tap: ticker >',
   ]
 }
@@ -557,12 +667,44 @@ function buildContent(): string {
       `up: +${fmtCoinPrice(coin, ALERT_STEP[coin])}  dn: -${fmtCoinPrice(coin, ALERT_STEP[coin])}`,
       'dbl-tap: next coin',
       'TG: @polyglance_alerts_bot',
-      'tap: voice >',
+      'tap: odds alert >',
     ].join('\n')
+  }
+
+  if (view === 'odds-alert') {
+    return oddsAlertLines().join('\n')
   }
 
   // voice
   return voiceLines().join('\n')
+}
+
+/** Isi view ODDS-ALERT (8 baris). Menampilkan pasar yang dipilih + ambang
+  + arah + status. Kalau pasar yang dipilih bukan pasar alert tersimpan,
+  status OFF — swipe up/down akan membuat alert BARU di pasar ini. */
+function oddsAlertLines(): string[] {
+  const m = selectedOddsMarket()
+  if (!m) return ['ODDS ALERT', 'loading markets...', 'tap: voice >']
+  const label = shortOddsQuestion(m.question)
+  const isMine = oddsAlert.question === m.question && oddsAlert.threshold > 0
+  const statusLine = !isMine
+    ? 'status: OFF'
+    : oddsAlert.triggered
+      ? 'status: TRIGGERED!'
+      : 'status: WAITING'
+  const firesLine = !isMine
+    ? 'swipe up/down to set'
+    : `fires YES ${oddsAlert.direction === 'above' ? '>=' : '<='} ${oddsAlert.threshold}%`
+  return [
+    'ODDS ALERT',
+    label,
+    `YES ${m.yesPct}% now`,
+    firesLine,
+    statusLine,
+    'up: +5%  dn: -5%',
+    'dbl-tap: next market',
+    'tap: voice >',
+  ]
 }
 
 function render(): void {
@@ -678,6 +820,14 @@ async function fetchOdds(): Promise<void> {
       ? filtered
       : [...filtered, ...parsed.filter((m) => !filtered.includes(m))].slice(0, 3)
     console.log('gamma markets:', markets.length)
+    // Sekali saja: arahkan pilihan ODDS-ALERT ke pasar alert tersimpan.
+    if (!oddsAlertIdxSynced) {
+      oddsAlertIdxSynced = true
+      if (oddsAlert.question) {
+        const i = markets.findIndex((m) => m.question === oddsAlert.question)
+        if (i >= 0) oddsAlertIdx = i
+      }
+    }
   } catch (err) {
     console.log('gamma fetch failed:', err)
   }
@@ -708,10 +858,34 @@ function checkAlert(): void {
   }
 }
 
+// Odds alert menyala saat YES% pasar yang disimpan melewati ambang.
+// Dicek tiap refresh ODDS; pasar yang hilang dari daftar tidak bisa trigger.
+function checkOddsAlert(): void {
+  if (!oddsAlert.armed || oddsAlert.triggered || oddsAlert.threshold === 0 || !oddsAlert.direction) return
+  const m = markets.find((x) => x.question === oddsAlert.question)
+  if (!m) return
+  oddsAlert.lastYes = m.yesPct
+  const hit = oddsAlert.direction === 'above'
+    ? m.yesPct >= oddsAlert.threshold
+    : m.yesPct <= oddsAlert.threshold
+  if (hit) {
+    oddsAlert.triggered = true
+    saveOddsAlert()
+    // Auto-pindah ke view ODDS-ALERT sekali saat trigger.
+    if (view !== 'odds-alert') {
+      view = 'odds-alert'
+    }
+    render()
+  } else {
+    saveOddsAlert()
+  }
+}
+
 async function refreshAll(): Promise<void> {
   await fetchPrices()
   await fetchOdds()
   checkAlert()
+  checkOddsAlert()
   render()
 }
 
@@ -744,7 +918,7 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
   return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
 }
 
-const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'voice']
+const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'voice']
 
 function cancelListeningSync(): void {
   // Dipanggil saat pindah view / keluar: matikan mic, buang rekaman.
@@ -880,6 +1054,75 @@ function cancelActiveAlert(): string {
   return `ALERT ${coin} REMOVED`
 }
 
+/** Set odds alert dari suara: ambang + arah untuk pasar yang sedang dipilih
+  di view ODDS-ALERT (atau pasar teratas kalau belum ada). */
+function setOddsAlertTarget(threshold: number, direction: OddsDirection): string {
+  const m = selectedOddsMarket()
+  if (!m) return 'NO ODDS YET'
+  if (threshold < 5 || threshold > 95) return 'ODDS ALERT 5-95%'
+  oddsAlert = {
+    question: m.question,
+    threshold,
+    direction,
+    armed: true,
+    triggered: false,
+    lastYes: m.yesPct,
+  }
+  saveOddsAlert()
+  // Cek trigger tanpa auto-pindah view (hasil suara harus tampil dulu).
+  const hit = direction === 'above' ? m.yesPct >= threshold : m.yesPct <= threshold
+  if (hit) {
+    oddsAlert.triggered = true
+    saveOddsAlert()
+    render()
+    return `ODDS ALERT ${threshold}% HIT!`
+  }
+  render()
+  return `ODDS ALERT SET ${threshold}% ${direction.toUpperCase()}`
+}
+
+/** Hapus odds alert yang tersimpan. */
+function cancelOddsAlert(): string {
+  if (oddsAlert.threshold === 0 && !oddsAlert.armed && !oddsAlert.triggered) return 'NO ODDS ALERT'
+  oddsAlert = blankOddsAlert()
+  saveOddsAlert()
+  render()
+  return 'ODDS ALERT REMOVED'
+}
+
+/** Geser ambang odds alert +-5% (swipe up/down di view ODDS-ALERT).
+  Swipe pertama dari OFF: up = arah above (ambang = step 5% berikutnya di
+  atas YES sekarang), down = arah below (step 5% berikutnya di bawah).
+  Swipe down sampai 0 = batalkan alert (OFF). */
+function adjustOddsAlert(steps: number): void {
+  const m = selectedOddsMarket()
+  if (!m) { showTransient('NO ODDS YET'); return }
+  const yes = m.yesPct
+  if (oddsAlert.question !== m.question || oddsAlert.threshold === 0) {
+    const dir: OddsDirection = steps > 0 ? 'above' : 'below'
+    if (dir === 'above' && yes >= 95) { showTransient('YES ALREADY 95%+'); return }
+    if (dir === 'below' && yes <= 5) { showTransient('YES ALREADY 5%-'); return }
+    const t = dir === 'above'
+      ? Math.min(95, (Math.floor(yes / ODDS_ALERT_STEP) + 1) * ODDS_ALERT_STEP)
+      : Math.max(5, Math.floor((yes - 1) / ODDS_ALERT_STEP) * ODDS_ALERT_STEP)
+    oddsAlert = { question: m.question, threshold: t, direction: dir, armed: true, triggered: false, lastYes: yes }
+  } else {
+    const t = oddsAlert.threshold + steps * ODDS_ALERT_STEP
+    if (t <= 0) {
+      oddsAlert = blankOddsAlert()
+      saveOddsAlert()
+      render()
+      return
+    }
+    oddsAlert.threshold = Math.min(95, Math.max(5, t))
+    oddsAlert.armed = true
+    oddsAlert.triggered = false
+  }
+  saveOddsAlert()
+  checkOddsAlert()
+  render()
+}
+
 function swipeUp(): void {
   if (view === 'voice') {
     if (voicePhase === 'idle') { void startListening(); return }
@@ -895,6 +1138,7 @@ function swipeUp(): void {
     return
   }
   if (view === 'alerts') { adjustAlert(1); return }
+  if (view === 'odds-alert') { adjustOddsAlert(1); return }
   const msg = buyCoin(view === 'paper-btc' ? 'BTC' : 'ETH')
   if (!msg.startsWith('BOUGHT')) showTransient(msg)
 }
@@ -914,6 +1158,7 @@ function swipeDown(): void {
     return
   }
   if (view === 'alerts') { adjustAlert(-1); return }
+  if (view === 'odds-alert') { adjustOddsAlert(-1); return }
   const msg = sellCoin(view === 'paper-btc' ? 'BTC' : 'ETH')
   if (!msg.startsWith('SOLD')) showTransient(msg)
 }
@@ -939,10 +1184,15 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     // Di view ALERTS, double-tap = ganti aset alert (BTC -> ETH -> SOL).
+    // Di view ODDS-ALERT, double-tap = ganti pasar yang dipilih.
     // SDK tidak punya gesture swipe kiri/kanan; double-tap adalah satu-satunya
-    // gesture diskrit yang bebas di view ini. Di view lain tetap keluar.
+    // gesture diskrit yang bebas di kedua view ini. Di view lain tetap keluar.
     if (view === 'alerts') {
       cycleAlertAsset()
+      return
+    }
+    if (view === 'odds-alert') {
+      cycleOddsMarket()
       return
     }
     cancelListeningSync()

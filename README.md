@@ -16,12 +16,13 @@ One page, one full-screen text container (576×288, green monochrome).
 
 | View | Content | Swipe up / down |
 | --- | --- | --- |
-| **TICKER** | BTC + ETH price (CoinGecko) and 24h change, auto-refresh every 60s | Manual refresh |
+| **TICKER** | BTC, ETH, SOL, DOGE, XRP prices (CoinGecko) and 24h change, auto-refresh every 60s | Manual refresh |
 | **ODDS** | Top 3 crypto markets on Polymarket (YES % by 24h volume), each shown as a short distinct label like `BTC dip $55,000? YES 38%` | Previous / next page of markets |
 | **PAPER-BTC** | Virtual $10,000 portfolio: cash, BTC holding, total, P/L | Buy $100 BTC / sell $100 BTC |
 | **PAPER-ETH** | Same shared cash, ETH holding, total, P/L | Buy $100 ETH / sell $100 ETH |
-| **ALERTS** | BTC price alert: target + status (WAITING / `BTC HIT $X!`); Telegram bot row `@polyglance_alerts_bot` | Target +$1,000 / -$1,000 |
-| **VOICE** | Push-to-talk voice commands via Groq Whisper (e.g. `buy 100 bitcoin`, `set alert 58000`, `show odds`); live mic level meter | Start/stop listening / cancel |
+| **ALERTS** | Price alerts for BTC, ETH and SOL (v6): per-asset target + status (WAITING / `BTC HIT $X!`); Telegram bot row `@polyglance_alerts_bot`; **double-tap switches asset** | Target step per asset (BTC $1,000 / ETH $100 / SOL $10) |
+| **ODDS-ALERT** | Odds alert (v7): alarm when a Polymarket market's YES % crosses a threshold; status WAITING / TRIGGERED! / OFF; **double-tap switches market** | Threshold step 5% (swipe down to 0 cancels) |
+| **VOICE** | Push-to-talk voice commands via Groq Whisper (v6: `sell all bitcoin`, `show portfolio`, `cancel alert`, `buy 100 bitcoin`, `set alert 58000`; v7: `set odds alert 60`); live mic level meter | Start/stop listening / cancel |
 
 - Paper trades are stored in `localStorage` (`polyglance.paper.v2`, migrated
   from v1 `{cash, btc}` with ETH starting at 0), so the portfolio survives
@@ -30,21 +31,34 @@ One page, one full-screen text container (576×288, green monochrome).
   otherwise the glasses show `NOT ENOUGH BTC` / `NOT ENOUGH ETH` for
   3 seconds.
 - The price alert arms automatically once a target is set (default: the next
-  whole $1,000 above the current BTC price). When BTC reaches the target the
-  glasses show `BTC HIT $X!` and jump to the ALERTS view. Target and status
-  are stored in `localStorage` (`polyglance.alert.v1`).
+  step above the current price per asset). When an asset reaches its target
+  the glasses show e.g. `BTC HIT $X!` and jump to the ALERTS view. Targets
+  and status are stored per asset in `localStorage`
+  (`polyglance.alert.v2`, migrated from v1 BTC-only); a cancelled alert is
+  never silently re-armed on refresh.
+- **Odds alerts (v7):** one active odds alert at a time, stored in
+  `localStorage` (`polyglance.odds-alert.v1`, no default, no seeded flag).
+  Set it from the ODDS-ALERT view (swipe up = above, swipe down = below,
+  step 5%; swipe down to 0 cancels), by voice (`set odds alert above 60`,
+  `odds alert below 40`, `cancel odds alert`), or via Telegram
+  (`/alertodds btc dip above 60`). Every ODDS refresh checks the alert;
+  on crossing, the glasses show `TRIGGERED!` and jump to the ODDS-ALERT
+  view. A cancelled alert is never re-armed.
 - If a fetch fails, the app keeps showing the last data with an
   `OFFLINE - last data` line instead of going blank.
 - All on-glasses text is plain ASCII (max 8 lines, 34 chars per line).
 
-## Voice + Telegram (v5)
+## Voice + Telegram (v6)
 
 - **Voice commands (VOICE view):** push-to-talk on the glasses mic
   (`g2-microphone` permission). Audio is transcribed with Groq Whisper
   (`whisper-large-v3-turbo`) and run through a local command parser
-  (`src/voice.ts`, 40/40 unit tests) — the same parser the settings-page
-  command chips use, so commands are testable without speaking. Without a
-  Groq key the view explains how to set one.
+  (`src/voice.ts`, 70/70 unit tests) — the same parser the settings-page
+  command chips use, so commands are testable without speaking. New in v6:
+  `sell all bitcoin` / `sell all`, `show portfolio`, and `cancel alert`.
+  New in v7: `set odds alert above 60` / `odds alert below 40` /
+  `cancel odds alert` (threshold validated 5–95).
+  Without a Groq key the view explains how to set one.
 - **Your key stays on your phone:** the Groq API key is entered in the
   companion settings page and stored in `localStorage` only — it is never
   sent anywhere except `api.groq.com` for transcription. If the direct
@@ -55,7 +69,9 @@ One page, one full-screen text container (576×288, green monochrome).
 - **Telegram alerts:** a Cloudflare Worker watcher (`watcher/`, cron every
   minute) polls prices and runs the bot **@polyglance_alerts_bot**:
   `/alert btc above 58000`, `/price`, `/odds`, `/list`, `/remove 1`,
-  `/health`, `/help`. Alerts fire once per crossing and keep working even
+  `/health`, `/help`. New in v7: `/alertodds <keyword> above|below <pct>`
+  (e.g. `/alertodds btc dip above 60`) — the Worker checks odds alerts
+  each tick and fires once per crossing. Alerts fire once per crossing and keep working even
   when the glasses app is closed. The bot token is a Worker secret only —
   never in this repo. Price source is CoinGecko with a Coinbase spot
   fallback (CoinGecko returns 403 to Workers); see
@@ -65,9 +81,9 @@ One page, one full-screen text container (576×288, green monochrome).
 
 Glasses display (576×288), captured in the Even Hub simulator.
 
-![TICKER — live BTC + ETH prices](images/frame-ticker.png)
+![TICKER — live prices for 5 coins](images/frame-ticker-v6.png)
 
-*TICKER — live BTC + ETH prices from CoinGecko, auto-refresh every 60 seconds.*
+*TICKER (v6) — live BTC, ETH, SOL, DOGE, XRP prices from CoinGecko, auto-refresh every 60 seconds.*
 
 ![ODDS — Polymarket crypto markets](images/frame-odds-v5.png)
 
@@ -79,11 +95,11 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 ![VOICE — push-to-talk voice commands](images/frame-voice-v5.png)
 
-*VOICE — push-to-talk voice commands via Groq Whisper (`buy 100 bitcoin`, `set alert 58000`, `show odds`).*
+*VOICE — push-to-talk voice commands via Groq Whisper (v5 capture; v6 adds `sell all bitcoin`, `show portfolio`, `cancel alert`).*
 
-![ALERTS — BTC price alert + Telegram bot](images/frame-alerts-v5.png)
+![ALERTS — multi-asset price alerts + Telegram bot](images/frame-alerts-v6.png)
 
-*ALERTS — BTC price alert (target $62,000, WAITING) with the Telegram bot row (`@polyglance_alerts_bot`).*
+*ALERTS (v6) — price alert for ETH (target $1,800, WAITING) with the Telegram bot row (`@polyglance_alerts_bot`); double-tap switches asset (BTC → ETH → SOL).*
 
 ## Demo
 
@@ -95,7 +111,7 @@ Glasses display (576×288), captured in the Even Hub simulator.
 - **Even Hub SDK** `@evenrealities/even_hub_sdk` 0.0.10
 - **Node.js** 20 LTS or newer (developed on Node v24 in Termux)
 - **Core app: no backend, no API keys.** Data comes straight from public APIs:
-  - [CoinGecko](https://api.coingecko.com/api/v3/simple/price) — BTC/ETH prices
+  - [CoinGecko](https://api.coingecko.com/api/v3/simple/price) — BTC/ETH/SOL/DOGE/XRP prices
   - [Polymarket Gamma API](https://gamma-api.polymarket.com/markets) — market odds
 - **Voice (optional):** your own Groq API key, stored on-phone only (see
   above). **Telegram alerts (optional):** Cloudflare Worker in `watcher/`
@@ -134,22 +150,22 @@ Notes:
 
 ## Install (.ehpk)
 
-`polyglance.ehpk` (in this repo) is the packaged v5 app — load it in the
+`polyglance.ehpk` (in this repo) is the packaged v7 app — load it in the
 Even Hub simulator or the Even App to try it without building.
 
 ## Project structure
 
 ```
 app.json          # Even Hub manifest (package id, SDK version, network whitelist, g2-microphone)
-src/main.ts       # Whole app: bridge setup, 6 views, paper trade BTC+ETH, price alert, voice
+src/main.ts       # Whole app: bridge setup, 7 views, paper trade BTC+ETH, price alerts, odds alerts, voice
 src/voice.ts      # Voice command parser + PCM-to-WAV + mic level (unit-tested)
 src/stt.ts        # Groq Whisper STT + Worker proxy fallback (unit-tested)
 index.html        # Vite entry + companion settings page (Groq key, STT proxy URL, test chips)
 vite.config.ts    # Vite config (template)
 images/           # Simulator screenshots (TICKER / ODDS / PAPER / VOICE / ALERTS)
 watcher/          # Telegram bot + price watcher (Cloudflare Worker, Node fallback, tests)
-tests/            # Unit tests: voice parser (40), STT fallback (18), watcher core (30)
-polyglance.ehpk   # Packaged v5 app for the simulator / Even App
+tests/            # Unit tests: voice parser (70), STT fallback (18), watcher core (53)
+polyglance.ehpk   # Packaged v7 app for the simulator / Even App
 ```
 
 ## Submission

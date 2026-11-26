@@ -9,6 +9,9 @@ import {
   fmtUsd,
   parseBotCommand,
   checkAlertCrossings,
+  checkOddsAlertCrossings,
+  findOddsMarket,
+  oddsYesByQuestion,
   formatOddsTop,
   parseCoinGeckoPrices,
   parseCoinbaseSpot,
@@ -26,7 +29,7 @@ const STATE_KEY = 'polyglance-state-v1'
 const tg = (token) => `https://api.telegram.org/bot${token}`
 
 function emptyState() {
-  return { offset: 0, chats: [], alerts: [], lastPrices: null, lastTick: null, priceSource: null, priceError: null }
+  return { offset: 0, chats: [], alerts: [], oddsAlerts: [], lastOdds: null, lastPrices: null, lastTick: null, priceSource: null, priceError: null }
 }
 
 async function loadState(kv) {
@@ -76,6 +79,7 @@ async function handleCommand(token, state, chatId, parsed) {
       return
     case 'health': {
       const n = state.alerts.filter((a) => a.chatId === chatId).length
+        + (state.oddsAlerts || []).filter((a) => a.chatId === chatId).length
       await sendMessage(
         token,
         chatId,
@@ -129,30 +133,86 @@ async function handleCommand(token, state, chatId, parsed) {
       )
       return
     }
+    case 'alertodds': {
+      // Cari pasar dari keyword di Gamma saat ini, lalu simpan alertnya.
+      try {
+        const res = await fetch(GAMMA_URL)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data = await res.json()
+        const arr = Array.isArray(data) ? data : data?.markets ?? []
+        const found = findOddsMarket(arr, parsed.keyword)
+        if (!found) {
+          await sendMessage(token, chatId, `No Polymarket market matches "${parsed.keyword}". Try another keyword, e.g. /alertodds bitcoin above 60`)
+          return
+        }
+        ;(state.oddsAlerts || (state.oddsAlerts = [])).push({
+          chatId,
+          keyword: parsed.keyword,
+          question: found.question,
+          threshold: parsed.pct,
+          direction: parsed.direction,
+          fired: false,
+          lastYes: found.yes,
+          createdAt: now,
+        })
+        const short = found.question.replace(/^Will\s+/i, '')
+        const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
+        await sendMessage(
+          token,
+          chatId,
+          `Odds alert set: "${shortQ}" YES ${parsed.direction} ${parsed.pct}% (now ${found.yes}%). I will message you when it crosses.`,
+        )
+      } catch {
+        await sendMessage(token, chatId, 'Could not fetch odds right now. Try again in a minute.')
+      }
+      return
+    }
     case 'list': {
-      const mine = state.alerts
-        .map((a, i) => ({ a, i }))
+      const priceMine = state.alerts
+        .map((a, i) => ({ a, i, kind: 'price' }))
         .filter(({ a }) => a.chatId === chatId)
-      if (mine.length === 0) {
+      const oddsMine = (state.oddsAlerts || [])
+        .map((a, i) => ({ a, i, kind: 'odds' }))
+        .filter(({ a }) => a.chatId === chatId)
+      const all = [...priceMine, ...oddsMine]
+      if (all.length === 0) {
         await sendMessage(token, chatId, 'No alerts yet. Use /alert btc above 58000')
         return
       }
-      const lines = mine.map(({ a, i }) => `${i + 1}. ${a.coin} ${a.direction} ${fmtUsd(a.price)}${a.fired ? ' (fired)' : ''}`)
+      const lines = all.map(({ a, kind }, n) => {
+        if (kind === 'price') return `${n + 1}. ${a.coin} ${a.direction} ${fmtUsd(a.price)}${a.fired ? ' (fired)' : ''}`
+        const short = a.question.replace(/^Will\s+/i, '')
+        const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
+        const now = typeof a.lastYes === 'number' ? ` (now ${a.lastYes}%)` : ''
+        return `${n + 1}. ODDS "${shortQ}" YES ${a.direction} ${a.threshold}%${now}${a.fired ? ' (fired)' : ''}`
+      })
       await sendMessage(token, chatId, 'Your alerts:\n' + lines.join('\n'))
       return
     }
     case 'remove': {
-      const mine = state.alerts
-        .map((a, i) => ({ a, i }))
+      const priceMine = state.alerts
+        .map((a, i) => ({ a, i, kind: 'price' }))
         .filter(({ a }) => a.chatId === chatId)
-      const target = mine[parsed.index - 1]
+      const oddsMine = (state.oddsAlerts || [])
+        .map((a, i) => ({ a, i, kind: 'odds' }))
+        .filter(({ a }) => a.chatId === chatId)
+      const all = [...priceMine, ...oddsMine]
+      const target = all[parsed.index - 1]
       if (!target) {
         await sendMessage(token, chatId, `No alert #${parsed.index}. Use /list to see yours.`)
         return
       }
-      const removed = state.alerts[target.i]
-      state.alerts.splice(target.i, 1)
-      await sendMessage(token, chatId, `Removed: ${removed.coin} ${removed.direction} ${fmtUsd(removed.price)}`)
+      if (target.kind === 'price') {
+        const removed = state.alerts[target.i]
+        state.alerts.splice(target.i, 1)
+        await sendMessage(token, chatId, `Removed: ${removed.coin} ${removed.direction} ${fmtUsd(removed.price)}`)
+      } else {
+        const removed = state.oddsAlerts[target.i]
+        state.oddsAlerts.splice(target.i, 1)
+        const short = removed.question.replace(/^Will\s+/i, '')
+        const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
+        await sendMessage(token, chatId, `Removed odds alert: "${shortQ}" YES ${removed.direction} ${removed.threshold}%`)
+      }
       return
     }
   }
@@ -218,6 +278,36 @@ async function tick(env) {
       )
     }
     state.lastPrices = prices
+  }
+
+  // 1b. Odds alerts — hanya kalau ada yang diset (hemat satu fetch Gamma).
+  // Ambil YES% terbaru dari Gamma, cek crossing terhadap tick sebelumnya.
+  if ((state.oddsAlerts || []).length > 0) {
+    try {
+      const res = await fetch(GAMMA_URL)
+      if (res.ok) {
+        const data = await res.json()
+        const arr = Array.isArray(data) ? data : data?.markets ?? []
+        const newOdds = oddsYesByQuestion(arr)
+        const { fired, alerts } = checkOddsAlertCrossings(state.oddsAlerts, state.lastOdds, newOdds)
+        state.oddsAlerts = alerts.map((a) => ({
+          ...a,
+          lastYes: typeof newOdds[a.question] === 'number' ? newOdds[a.question] : a.lastYes,
+        }))
+        for (const f of fired) {
+          const short = f.alert.question.replace(/^Will\s+/i, '')
+          const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
+          await sendMessage(
+            token,
+            f.alert.chatId,
+            `ODDS ALERT: "${shortQ}" YES ${f.yes}% — crossed ${f.alert.direction} ${f.alert.threshold}%!`,
+          )
+        }
+        state.lastOdds = newOdds
+      }
+    } catch {
+      // Gamma gagal — coba lagi tick berikutnya, alert tidak hilang
+    }
   }
 
   // 2. Perintah bot (polling getUpdates)
@@ -318,6 +408,7 @@ export default {
           ok: true,
           lastTick: state.lastTick,
           alerts: state.alerts.length,
+          oddsAlerts: (state.oddsAlerts || []).length,
           chats: state.chats.length,
           btc: state.lastPrices?.btc ?? null,
           eth: state.lastPrices?.eth ?? null,

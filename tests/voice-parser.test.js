@@ -80,6 +80,22 @@ eq(parseVoiceCommand('delete alert'), { type: 'cancel-alert' }, 'delete alert')
 eq(parseVoiceCommand('clear alert'), { type: 'cancel-alert' }, 'clear alert')
 eq(parseVoiceCommand('cancel'), { type: 'stop' }, 'cancel saja tetap stop')
 
+// --- odds alert (v7) ---
+eq(parseVoiceCommand('set odds alert above 60'), { type: 'set-odds-alert', threshold: 60, direction: 'above' }, 'odds alert above 60')
+eq(parseVoiceCommand('odds alert below 40'), { type: 'set-odds-alert', threshold: 40, direction: 'below' }, 'odds alert below 40')
+eq(parseVoiceCommand('set odds alert 60'), { type: 'set-odds-alert', threshold: 60, direction: 'above' }, 'odds alert tanpa arah = above')
+eq(parseVoiceCommand('set odds alert above sixty'), { type: 'set-odds-alert', threshold: 60, direction: 'above' }, 'odds alert kata-angka')
+eq(parseVoiceCommand('set odds alert under 25'), { type: 'set-odds-alert', threshold: 25, direction: 'below' }, 'odds alert under = below')
+eq(parseVoiceCommand('cancel odds alert'), { type: 'cancel-odds-alert' }, 'cancel odds alert')
+eq(parseVoiceCommand('remove odds alert'), { type: 'cancel-odds-alert' }, 'remove odds alert')
+eq(parseVoiceCommand('odds alert'), { type: 'goto', view: 'odds-alert' }, 'odds alert tanpa angka = buka view')
+eq(parseVoiceCommand('show odds alert'), { type: 'goto', view: 'odds-alert' }, 'show odds alert = buka view')
+eq(parseVoiceCommand('set odds alert above 120'), null, 'odds alert >95 -> null')
+eq(parseVoiceCommand('set odds alert above 3'), null, 'odds alert <5 -> null')
+eq(parseVoiceCommand('show me the odds'), { type: 'goto', view: 'odds' }, 'odds biasa tetap ke view odds')
+eq(parseVoiceCommand('cancel alert'), { type: 'cancel-alert' }, 'cancel alert biasa tetap cancel-alert')
+eq(parseVoiceCommand('set alert eth 1800'), { type: 'set-alert', target: 1800, coin: 'ETH' }, 'alert harga tetap price alert')
+
 // --- portfolio (v6, eksplisit) ---
 eq(parseVoiceCommand('show portfolio'), { type: 'goto', view: 'paper-btc' }, 'show portfolio')
 eq(parseVoiceCommand('check portfolio'), { type: 'goto', view: 'paper-btc' }, 'check portfolio')
