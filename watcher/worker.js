@@ -27,6 +27,8 @@ import {
   formatOddsAlertSetReply,
   formatRemovedReply,
   myAlerts,
+  trackLivePrice,
+  pruneLivePrices,
   parseCoinGeckoPrices,
   parseCoinbaseSpot,
   parseCoinbaseStats,
@@ -57,6 +59,7 @@ const KEY_META = 'polyglance-state-v1' // offset getUpdates, chats, processedUpd
 const KEY_PRICES = 'polyglance-prices-v1' // lastPrices, lastTick, priceSource, priceError, lastOdds — ditulis HANYA oleh cron
 const KEY_ALERTS = 'polyglance-alerts-v1' // alerts, oddsAlerts
 const KEY_WEBHOOK = 'polyglance-webhook-v1' // {active, url, setAt, checkedAt, pending} — ditulis HANYA /setwebhook + verifikasi berkala
+const KEY_LIVE = 'polyglance-liveprice-v1' // {messages: [{chatId, messageId, sentAt}]} — pesan /price yang terus di-edit tiap tick (30 menit)
 
 // Kenapa state dipecah 4 key: KV Cloudflare itu eventually consistent —
 // satu tick cron yang membaca snapshot lama lalu menyimpan ulang SELURUH
@@ -110,8 +113,15 @@ async function fetchWithTimeout(url, ms = 5000) {
 }
 
 /** Harga live 5 koin untuk /price: spot Coinbase + stats (perubahan 24 jam).
- * Per koin gagal -> fallback harga terakhir dari cron (BTC/ETH, ditandai stale)
- * -> kalau tidak ada juga, koin dilewati. */
+ * %24h TIDAK PERNAH hilang diam-diam (bug 26 Nov 13:16 WIB: SOL/DOGE tanpa
+ * %24h sementara spot lolos semua — stats gagal sebagian di tengah jalan):
+ *  1. stats dicoba 1x lagi (jeda 400 ms) kalau gagal/timeout,
+ *  2. kalau tetap gagal, %24h dihitung dari candle 1h (open candle pertama
+ *     24 jam terakhir -> close candle terakhir, cara yang sama dengan /app),
+ *  3. kalau itu pun gagal, formatPriceReply menampilkan "(— 24h)" dengan
+ *     jelas (bukan diam-diam hilang).
+ * Per koin gagal total (tidak ada harga) -> fallback harga terakhir dari
+ * cron (BTC/ETH, ditandai stale) -> kalau tidak ada juga, koin dilewati. */
 async function fetchLivePrices(state) {
   const jobs = PRICE_SYMBOLS.map(async (sym) => {
     let price = null
@@ -120,16 +130,12 @@ async function fetchLivePrices(state) {
       const res = await fetchWithTimeout(COINBASE_SPOT(sym), 8000)
       if (res.ok) price = parseCoinbaseSpot(await res.json())
     } catch { /* lanjut ke stats / fallback */ }
-    try {
-      const res = await fetchWithTimeout(COINBASE_STATS(sym), 8000)
-      if (res.ok) {
-        const st = parseCoinbaseStats(await res.json())
-        if (st) {
-          changePct = st.changePct
-          if (price === null) price = st.last
-        }
-      }
-    } catch { /* lanjut ke fallback */ }
+    const st = await fetchCoinStats(sym)
+    if (st) {
+      changePct = st.changePct
+      if (price === null) price = st.last
+    }
+    if (changePct === null) changePct = await fetchCandlesChangePct(sym)
     if (price === null && state?.lastPrices) {
       const known = state.lastPrices[sym.toLowerCase()]
       if (typeof known === 'number') return { sym, price: known, changePct, stale: true }
@@ -138,6 +144,44 @@ async function fetchLivePrices(state) {
     return { sym, price, changePct, stale: false }
   })
   return (await Promise.all(jobs)).filter(Boolean)
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/** Stats Coinbase Exchange — 1x retry (jeda 400 ms) kalau gagal. Return
+ * objek stats {open, last, high, low, changePct} atau null. */
+async function fetchCoinStats(sym) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(COINBASE_STATS(sym), 8000)
+      if (res.ok) {
+        const st = parseCoinbaseStats(await res.json())
+        if (st) return st
+      }
+    } catch { /* retry sekali */ }
+    if (attempt === 0) await sleep(400)
+  }
+  return null
+}
+
+/** %24h dari candle 1h (fallback kalau stats gagal): open candle pertama
+ * 24 jam terakhir -> close candle terakhir. */
+async function fetchCandlesChangePct(sym) {
+  try {
+    const res = await fetchWithTimeout(COINBASE_CANDLES(sym, 3600), 8000)
+    if (!res.ok) return null
+    const candles = parseCoinbaseCandles(await res.json())
+    if (!candles || candles.length < 2) return null
+    const last24 = candles.slice(-24)
+    const first = last24[0]
+    const last = last24[last24.length - 1]
+    if (!first || !last || first.open <= 0) return null
+    return ((last.close - first.open) / first.open) * 100
+  } catch {
+    return null
+  }
 }
 
 /** Data 1 koin untuk /app: spot + candle 1 jam (perubahan/high/low/sparkline
@@ -394,6 +438,9 @@ function emptyPrices() {
 function emptyAlerts() {
   return { alerts: [], oddsAlerts: [] }
 }
+function emptyLive() {
+  return { messages: [] }
+}
 
 async function loadPart(kv, key, empty) {
   try {
@@ -408,11 +455,12 @@ async function loadPart(kv, key, empty) {
 
 /** Baca semua bagian paralel, gabung jadi satu objek `state` (dipakai handler lama). */
 async function loadAll(kv) {
-  const [meta, prices, alerts, webhook] = await Promise.all([
+  const [meta, prices, alerts, webhook, live] = await Promise.all([
     loadPart(kv, KEY_META, emptyMeta),
     loadPart(kv, KEY_PRICES, emptyPrices),
     loadPart(kv, KEY_ALERTS, emptyAlerts),
     loadPart(kv, KEY_WEBHOOK, () => null),
+    loadPart(kv, KEY_LIVE, emptyLive),
   ])
   // Migrasi sekali (v1 -> key terpisah): kalau key baru masih kosong tapi
   // blob lama (KEY_META) masih menyimpan field itu, pakai nilai lama + tulis
@@ -437,7 +485,7 @@ async function loadAll(kv) {
       migrated.webhook = legacy.webhook
     }
   }
-  const state = { ...meta, ...prices, ...alerts, webhook: webhook ?? migrated.webhook ?? null }
+  const state = { ...meta, ...prices, ...alerts, webhook: webhook ?? migrated.webhook ?? null, live }
   // Tulis hasil migrasi (best-effort; gagal pun tidak fatal — fallback baca tetap jalan).
   try {
     if (migrated.prices) await kv.put(KEY_PRICES, JSON.stringify(prices))
@@ -453,19 +501,21 @@ function snapshotParts(state) {
     meta: JSON.stringify({ offset: state.offset, chats: state.chats, processedUpdateIds: state.processedUpdateIds || [] }),
     prices: JSON.stringify({ lastPrices: state.lastPrices, lastTick: state.lastTick, priceSource: state.priceSource, priceError: state.priceError, lastOdds: state.lastOdds }),
     alerts: JSON.stringify({ alerts: state.alerts, oddsAlerts: state.oddsAlerts || [] }),
+    live: JSON.stringify({ messages: state.live?.messages || [] }),
   }
 }
 
 function partOf(state, which) {
   if (which === 'meta') return { offset: state.offset, chats: state.chats, processedUpdateIds: state.processedUpdateIds || [] }
   if (which === 'prices') return { lastPrices: state.lastPrices, lastTick: state.lastTick, priceSource: state.priceSource, priceError: state.priceError, lastOdds: state.lastOdds }
+  if (which === 'live') return { messages: state.live?.messages || [] }
   return { alerts: state.alerts, oddsAlerts: state.oddsAlerts || [] }
 }
 
 /** Simpan HANYA bagian yang berubah vs snapshot (hindari timpa-menimpa antar penulis). */
 async function saveChanged(kv, state, snap) {
   const jobs = []
-  for (const [which, key] of [['meta', KEY_META], ['prices', KEY_PRICES], ['alerts', KEY_ALERTS]]) {
+  for (const [which, key] of [['meta', KEY_META], ['prices', KEY_PRICES], ['alerts', KEY_ALERTS], ['live', KEY_LIVE]]) {
     if (JSON.stringify(partOf(state, which)) !== snap[which]) {
       jobs.push(kv.put(key, JSON.stringify(partOf(state, which))))
     }
@@ -477,6 +527,8 @@ async function saveWebhookFlag(kv, flag) {
   await kv.put(KEY_WEBHOOK, JSON.stringify(flag))
 }
 
+/** Kirim pesan bot. Return message_id (number) kalau terkirim, null kalau gagal.
+ * Dipakai /price untuk melacak pesan live-nya (di-edit tiap tick). */
 async function sendMessage(token, chatId, text) {
   try {
     const res = await fetch(`${tg(token)}/sendMessage`, {
@@ -484,9 +536,35 @@ async function sendMessage(token, chatId, text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text }),
     })
-    return res.ok
+    if (!res.ok) return null
+    const data = await res.json().catch(() => null)
+    return typeof data?.result?.message_id === 'number' ? data.result.message_id : null
   } catch {
-    return false
+    return null
+  }
+}
+
+/**
+ * Edit pesan bot sendiri (untuk live /price). Return:
+ *  'ok' — berhasil; 'not_modified' — teks sama (harga belum bergerak, bukan error);
+ *  'not_found' — pesan sudah dihapus / tidak bisa di-edit (berhenti lacak);
+ *  'error' — gagal lain (coba lagi tick berikutnya, entri dipertahankan).
+ */
+async function editMessageText(token, chatId, messageId, text) {
+  try {
+    const res = await fetch(`${tg(token)}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok && data?.ok) return 'ok'
+    const desc = String(data?.description || '')
+    if (/message is not modified/i.test(desc)) return 'not_modified'
+    if (/message to edit not found|message can't be edited|message to delete not found/i.test(desc)) return 'not_found'
+    return 'error'
+  } catch {
+    return 'error'
   }
 }
 
@@ -528,7 +606,12 @@ async function handleCommand(token, state, chatId, parsed) {
     case 'price': {
       const coins = await fetchLivePrices(state)
       const updated = new Date().toISOString().slice(11, 16) + ' UTC'
-      await sendMessage(token, chatId, formatPriceReply(coins, 'Coinbase', updated))
+      // Pesan live: dilacak di KV (satu per chat) lalu di-edit tiap tick cron
+      // selama 30 menit dengan harga fresh — footer di teks menjelaskan itu.
+      const messageId = await sendMessage(token, chatId, formatPriceReply(coins, 'Coinbase', updated, { live: true }))
+      if (typeof messageId === 'number') {
+        state.live = { messages: trackLivePrice(state.live?.messages, chatId, messageId) }
+      }
       return
     }
     case 'odds': {
@@ -711,6 +794,32 @@ async function tick(env) {
       }
     } catch {
       // Gamma gagal — coba lagi tick berikutnya, alert tidak hilang
+    }
+  }
+
+  // 1c. Live /price — edit pesan /price yang masih <30 menit dengan harga
+  // fresh (1 fetch untuk semua chat). Entri kedaluwarsa dibuang; entri yang
+  // pesannya sudah dihapus (edit -> not_found) juga dibuang; gagal lain
+  // (network) dipertahankan untuk dicoba lagi tick berikutnya. Scope HANYA
+  // /price — /odds dan perintah lain tidak disentuh.
+  {
+    const { live, expired } = pruneLivePrices(state.live?.messages)
+    if (expired.length > 0 || live.length !== (state.live?.messages || []).length) {
+      state.live = { messages: live }
+    }
+    if (live.length > 0) {
+      const coins = await fetchLivePrices(state)
+      if (coins.length > 0) {
+        const updated = new Date().toISOString().slice(11, 16) + ' UTC'
+        const text = formatPriceReply(coins, 'Coinbase', updated, { live: true })
+        const remaining = []
+        for (const m of live) {
+          const result = await editMessageText(token, m.chatId, m.messageId, text)
+          if (result === 'not_found') continue // pesan dihapus -> berhenti lacak
+          remaining.push(m)
+        }
+        if (remaining.length !== live.length) state.live = { messages: remaining }
+      }
     }
   }
 

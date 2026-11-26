@@ -24,11 +24,12 @@ function check(name, cond, extra = '') {
   else { fail++; console.log(`  FAIL ${name} ${extra}`) }
 }
 
-// --- Mock KV (in-memory) — 4 key seperti worker.js ---
+// --- Mock KV (in-memory) — 5 key seperti worker.js ---
 const KEY_META = 'polyglance-state-v1'
 const KEY_PRICES = 'polyglance-prices-v1'
 const KEY_ALERTS = 'polyglance-alerts-v1'
 const KEY_WEBHOOK = 'polyglance-webhook-v1'
+const KEY_LIVE = 'polyglance-liveprice-v1'
 function makeKv(seed = {}) {
   const store = new Map(Object.entries(seed))
   return {
@@ -37,11 +38,12 @@ function makeKv(seed = {}) {
     async put(k, v) { store.set(k, v) },
   }
 }
-// Pecah satu objek state gabungan ke 4 key (seperti yang dilakukan worker).
+// Pecah satu objek state gabungan ke 5 key (seperti yang dilakukan worker).
 function seedState(kv, state) {
   kv.store.set(KEY_META, JSON.stringify({ offset: state.offset, chats: state.chats, processedUpdateIds: state.processedUpdateIds || [] }))
   kv.store.set(KEY_PRICES, JSON.stringify({ lastPrices: state.lastPrices, lastTick: state.lastTick, priceSource: state.priceSource, priceError: state.priceError, lastOdds: state.lastOdds }))
   kv.store.set(KEY_ALERTS, JSON.stringify({ alerts: state.alerts, oddsAlerts: state.oddsAlerts || [] }))
+  kv.store.set(KEY_LIVE, JSON.stringify({ messages: state.liveMessages || [] }))
   if (state.webhook) kv.store.set(KEY_WEBHOOK, JSON.stringify(state.webhook))
 }
 // Seed blob LEGACY saja (v1, semua di KEY_META) — untuk tes migrasi.
@@ -50,7 +52,7 @@ function seedLegacy(kv, legacy) {
 }
 function stateOf(kv) {
   const read = (k) => { const v = kv.store.get(k); return v ? JSON.parse(v) : {} }
-  return { ...read(KEY_META), ...read(KEY_PRICES), ...read(KEY_ALERTS), webhook: kv.store.has(KEY_WEBHOOK) ? JSON.parse(kv.store.get(KEY_WEBHOOK)) : null }
+  return { ...read(KEY_META), ...read(KEY_PRICES), ...read(KEY_ALERTS), webhook: kv.store.has(KEY_WEBHOOK) ? JSON.parse(kv.store.get(KEY_WEBHOOK)) : null, liveMessages: kv.store.has(KEY_LIVE) ? (JSON.parse(kv.store.get(KEY_LIVE)).messages || []) : [] }
 }
 const BASE_STATE = {
   offset: 0, chats: [999], alerts: [{ chatId: 999, coin: 'BTC', direction: 'below', price: 60000, fired: false, createdAt: 'x' }],
@@ -62,6 +64,13 @@ const BASE_STATE = {
 const calls = []
 let webhookInfoUrl = WEBHOOK_URL // bisa diubah per tes (simulasi webhook dihapus)
 let gammaMarkets = [] // bisa diisi per tes
+// Kontrol kegagalan mock untuk tes %24h + live-edit (di-reset tiap tes yang memakai)
+const failStatsAlways = new Set() // stats koin ini selalu 429
+const failStatsOnce = new Set() // stats koin ini 429 di panggilan pertama saja (uji retry)
+const statsCalls = {} // hitung panggilan stats per koin
+const failCandlesAlways = new Set() // candles koin ini selalu 429
+let editMode = 'ok' // 'ok' | 'not_found' — mode balasan /editMessageText
+let nextMsgId = 1 // message_id sendMessage mock (naik tiap kirim)
 const storedProfile = { short: null, desc: null, commands: null, menuButton: null }
 function jres(obj, ok = true, status = 200) {
   return { ok, status, json: async () => obj }
@@ -92,7 +101,11 @@ function mockCandles(sym) {
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url)
   calls.push({ url: u, method: opts.method || 'GET', body: opts.body || null })
-  if (u.includes('/sendMessage')) return jres({ ok: true, result: { message_id: 1 } })
+  if (u.includes('/sendMessage')) return jres({ ok: true, result: { message_id: nextMsgId++ } })
+  if (u.includes('/editMessageText')) {
+    if (editMode === 'not_found') return jres({ ok: false, description: 'Bad Request: message to edit not found' }, false, 400)
+    return jres({ ok: true, result: true })
+  }
   if (u.includes('/setWebhook')) return jres({ ok: true, result: true, description: 'Webhook was set' })
   if (u.includes('/getWebhookInfo')) return jres({ ok: true, result: { url: webhookInfoUrl, has_custom_certificate: false, pending_update_count: 0 } })
   if (u.includes('/getUpdates')) return jres({ ok: true, result: [] })
@@ -107,10 +120,14 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.includes('api.coingecko.com')) return jres({ bitcoin: { usd: 61000 }, ethereum: { usd: 1700 } })
   if (u.includes('api.exchange.coinbase.com') && u.includes('/candles')) {
     const sym = (u.match(/products\/([A-Z]+)-USD\/candles/) || [])[1]
+    if (failCandlesAlways.has(sym)) return jres({ message: 'rate limited' }, false, 429)
     return jres(MOCK_SPOT[sym] ? mockCandles(sym) : [])
   }
   if (u.includes('api.exchange.coinbase.com') && u.includes('/stats')) {
     const sym = (u.match(/products\/([A-Z]+)-USD\/stats/) || [])[1]
+    statsCalls[sym] = (statsCalls[sym] || 0) + 1
+    if (failStatsAlways.has(sym)) return jres({ message: 'rate limited' }, false, 429)
+    if (failStatsOnce.has(sym) && statsCalls[sym] === 1) return jres({ message: 'rate limited' }, false, 429)
     return jres(MOCK_STATS[sym] || {})
   }
   if (u.includes('api.coinbase.com')) {
@@ -147,6 +164,8 @@ console.log('1. webhook /price')
   check('header sumber + jam', body.text.includes('Live prices (Coinbase,'), JSON.stringify(body.text))
   check('5 koin tampil', ['BTC $60,928', 'ETH $1,699', 'SOL $71.09', 'DOGE $0.0567', 'XRP $0.96'].every((s) => body.text.includes(s)), JSON.stringify(body.text))
   check('perubahan 24 jam tampil', body.text.includes('(+3.1% 24h)') && body.text.includes('(+4.9% 24h)'), JSON.stringify(body.text))
+  check('SOL + DOGE %24h tampil (bug 13:16 WIB)', body.text.includes('SOL $71.09 (+3.6% 24h)') && body.text.includes('DOGE $0.0567 (+4.0% 24h)'), JSON.stringify(body.text))
+  check('footer live ada', body.text.includes('updates every 60s for 30 min') && body.text.includes('send /price again'), JSON.stringify(body.text))
   check('update_id tercatat', stateOf(kv).processedUpdateIds.includes(1001))
 }
 
@@ -550,6 +569,138 @@ console.log('21. /app picker coin + timeframe')
   const res2 = await worker.fetch(new Request(`${BASE}/app?coin=FOO&tf=9x`), env(kv), makeCtx())
   const html2 = await res2.text()
   check('coin/tf tidak valid -> default BTC 1h', html2.includes('Candles · BTC · 1h'))
+}
+
+// 22. Webhook /price melacak pesan live di KV + footer
+console.log('22. /price melacak pesan live')
+{
+  const kv = makeKv()
+  seedState(kv, { ...BASE_STATE })
+  const ctx = makeCtx()
+  const req = new Request(`${BASE}/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ update_id: 5001, message: { chat: { id: 999 }, text: '/price' } }) })
+  const res = await worker.fetch(req, env(kv), ctx)
+  check('status 200', res.status === 200)
+  await ctx.drain()
+  const st = stateOf(kv)
+  check('1 entri live tersimpan', st.liveMessages.length === 1, JSON.stringify(st.liveMessages))
+  check('entri = chat + messageId + sentAt', st.liveMessages[0]?.chatId === 999 && typeof st.liveMessages[0]?.messageId === 'number' && typeof st.liveMessages[0]?.sentAt === 'number', JSON.stringify(st.liveMessages))
+}
+
+// 23. Stats gagal sekali -> retry -> %24h tetap ada (bug 13:16 WIB)
+console.log('23. stats gagal sekali: retry menyelamatkan %24h')
+{
+  failStatsOnce.add('SOL')
+  statsCalls.SOL = 0
+  const kv = makeKv()
+  seedState(kv, { ...BASE_STATE })
+  const ctx = makeCtx()
+  const req = new Request(`${BASE}/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ update_id: 5002, message: { chat: { id: 999 }, text: '/price' } }) })
+  await worker.fetch(req, env(kv), ctx)
+  await ctx.drain()
+  const sent = calls.filter((c) => c.url.includes('/sendMessage'))
+  const last = JSON.parse(sent[sent.length - 1].body)
+  check('SOL %24h tetap tampil setelah retry', last.text.includes('SOL $71.09 (+3.6% 24h)'), JSON.stringify(last.text))
+  check('stats SOL dipanggil 2x (retry)', statsCalls.SOL === 2, `calls=${statsCalls.SOL}`)
+  failStatsOnce.clear()
+}
+
+// 24. Stats gagal total -> fallback candle (SOL) + marker — (DOGE)
+console.log('24. stats gagal total: fallback candle + marker —')
+{
+  failStatsAlways.add('SOL')
+  failStatsAlways.add('DOGE')
+  failCandlesAlways.add('DOGE')
+  const kv = makeKv()
+  seedState(kv, { ...BASE_STATE })
+  const ctx = makeCtx()
+  const req = new Request(`${BASE}/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ update_id: 5003, message: { chat: { id: 999 }, text: '/price' } }) })
+  await worker.fetch(req, env(kv), ctx)
+  await ctx.drain()
+  const sent = calls.filter((c) => c.url.includes('/sendMessage'))
+  const last = JSON.parse(sent[sent.length - 1].body)
+  check('SOL %24h dari fallback candle', last.text.includes('SOL $71.09 (') && last.text.includes('% 24h)') && !last.text.includes('SOL $71.09 (— 24h)'), JSON.stringify(last.text))
+  check('DOGE tampil (— 24h) eksplisit', last.text.includes('DOGE $0.0567 (— 24h)'), JSON.stringify(last.text))
+  check('BTC/ETH/XRP %24h tetap ada', ['(+3.1% 24h)', '(+2.6% 24h)', '(+4.9% 24h)'].every((s) => last.text.includes(s)), JSON.stringify(last.text))
+  failStatsAlways.clear()
+  failCandlesAlways.clear()
+}
+
+// 25. Tick edit pesan /price live (masih <30 menit)
+console.log('25. tick edit pesan /price live')
+{
+  const kv = makeKv()
+  seedState(kv, {
+    ...BASE_STATE,
+    webhook: { active: true, url: WEBHOOK_URL, setAt: new Date().toISOString(), checkedAt: new Date().toISOString(), pending: 0 },
+    liveMessages: [{ chatId: 999, messageId: 42, sentAt: Date.now() }],
+  })
+  const ctx = makeCtx()
+  const nBefore = calls.length
+  await worker.scheduled({}, env(kv), ctx)
+  await ctx.drain()
+  const tickCalls = calls.slice(nBefore)
+  const edits = tickCalls.filter((c) => c.url.includes('/editMessageText'))
+  check('1x editMessageText', edits.length === 1, JSON.stringify(edits.length))
+  const ebody = JSON.parse(edits[0].body)
+  check('edit ke chat + pesan benar', ebody.chat_id === 999 && ebody.message_id === 42, JSON.stringify(ebody))
+  check('teks edit = /price live + footer', ebody.text.includes('Live prices (Coinbase,') && ebody.text.includes('updates every 60s for 30 min') && ebody.text.includes('BTC $60,928'), JSON.stringify(ebody.text))
+  check('entri live dipertahankan', stateOf(kv).liveMessages.length === 1 && stateOf(kv).liveMessages[0].messageId === 42)
+  check('alert BTC utuh', stateOf(kv).alerts.length === 1)
+}
+
+// 26. Tick buang entri live kedaluwarsa (>30 menit) tanpa edit
+console.log('26. tick buang entri live kedaluwarsa')
+{
+  const kv = makeKv()
+  seedState(kv, {
+    ...BASE_STATE,
+    webhook: { active: true, url: WEBHOOK_URL, setAt: new Date().toISOString(), checkedAt: new Date().toISOString(), pending: 0 },
+    liveMessages: [{ chatId: 999, messageId: 42, sentAt: Date.now() - 31 * 60 * 1000 }],
+  })
+  const ctx = makeCtx()
+  const nBefore = calls.length
+  await worker.scheduled({}, env(kv), ctx)
+  await ctx.drain()
+  const tickCalls = calls.slice(nBefore)
+  check('tidak ada editMessageText', !tickCalls.some((c) => c.url.includes('/editMessageText')))
+  check('entri dibuang', stateOf(kv).liveMessages.length === 0)
+  check('alert BTC utuh', stateOf(kv).alerts.length === 1)
+}
+
+// 27. Edit not_found (pesan dihapus) -> entri dibuang, tick tetap jalan
+console.log('27. edit not_found -> entri dibuang')
+{
+  editMode = 'not_found'
+  const kv = makeKv()
+  seedState(kv, {
+    ...BASE_STATE,
+    webhook: { active: true, url: WEBHOOK_URL, setAt: new Date().toISOString(), checkedAt: new Date().toISOString(), pending: 0 },
+    liveMessages: [{ chatId: 999, messageId: 42, sentAt: Date.now() }],
+  })
+  const ctx = makeCtx()
+  await worker.scheduled({}, env(kv), ctx)
+  await ctx.drain()
+  check('entri dibuang setelah not_found', stateOf(kv).liveMessages.length === 0)
+  check('alert BTC utuh', stateOf(kv).alerts.length === 1)
+  check('lastTick tetap jalan', typeof stateOf(kv).lastTick === 'string')
+  editMode = 'ok'
+}
+
+// 28. /price kedua ganti pesan live lama (satu per chat)
+console.log('28. /price kedua ganti pesan live lama')
+{
+  const kv = makeKv()
+  seedState(kv, { ...BASE_STATE })
+  const ctx = makeCtx()
+  const firstId = nextMsgId
+  for (const id of [6001, 6002]) {
+    const req = new Request(`${BASE}/webhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ update_id: id, message: { chat: { id: 999 }, text: '/price' } }) })
+    await worker.fetch(req, env(kv), ctx)
+    await ctx.drain()
+  }
+  const st = stateOf(kv)
+  check('satu entri saja', st.liveMessages.length === 1, JSON.stringify(st.liveMessages))
+  check('entri = pesan /price kedua', st.liveMessages[0]?.messageId === firstId + 1, JSON.stringify(st.liveMessages))
 }
 
 rmSync(tmp, { recursive: true, force: true })

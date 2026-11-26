@@ -24,6 +24,9 @@ import {
   formatOddsAlertSetReply,
   formatRemovedReply,
   myAlerts,
+  parseCoinbaseCandles,
+  trackLivePrice,
+  pruneLivePrices,
   parseCoinGeckoPrices,
   parseCoinbaseSpot,
   parseCoinbaseStats,
@@ -38,6 +41,7 @@ const COINBASE_BTC_URL = 'https://api.coinbase.com/v2/prices/BTC-USD/spot'
 const COINBASE_ETH_URL = 'https://api.coinbase.com/v2/prices/ETH-USD/spot'
 const COINBASE_SPOT = (sym) => `https://api.coinbase.com/v2/prices/${sym}-USD/spot`
 const COINBASE_STATS = (sym) => `https://api.exchange.coinbase.com/products/${sym}-USD/stats`
+const COINBASE_CANDLES = (sym, gran) => `https://api.exchange.coinbase.com/products/${sym}-USD/candles?granularity=${gran}`
 const PRICE_SYMBOLS = ['BTC', 'ETH', 'SOL', 'DOGE', 'XRP']
 const GAMMA_URL =
   'https://gamma-api.polymarket.com/markets?limit=100&active=true&closed=false&order=volume24hr&ascending=false'
@@ -46,7 +50,45 @@ async function fetchWithTimeout(url, ms = 8000) {
   return fetch(url, { signal: AbortSignal.timeout(ms) })
 }
 
-/** Harga live 5 koin untuk /price — sama seperti worker.js (spot + stats Coinbase). */
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/** Stats Coinbase Exchange — 1x retry (jeda 400 ms) kalau gagal. */
+async function fetchCoinStats(sym) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(COINBASE_STATS(sym), 8000)
+      if (res.ok) {
+        const st = parseCoinbaseStats(await res.json())
+        if (st) return st
+      }
+    } catch { /* retry sekali */ }
+    if (attempt === 0) await sleep(400)
+  }
+  return null
+}
+
+/** %24h dari candle 1h (fallback kalau stats gagal). */
+async function fetchCandlesChangePct(sym) {
+  try {
+    const res = await fetchWithTimeout(COINBASE_CANDLES(sym, 3600), 8000)
+    if (!res.ok) return null
+    const candles = parseCoinbaseCandles(await res.json())
+    if (!candles || candles.length < 2) return null
+    const last24 = candles.slice(-24)
+    const first = last24[0]
+    const last = last24[last24.length - 1]
+    if (!first || !last || first.open <= 0) return null
+    return ((last.close - first.open) / first.open) * 100
+  } catch {
+    return null
+  }
+}
+
+/** Harga live 5 koin untuk /price — sama seperti worker.js (spot + stats Coinbase).
+ * %24h tidak pernah hilang diam-diam: retry stats -> fallback candle 1h ->
+ * formatPriceReply menampilkan "(— 24h)" kalau tetap tidak ada. */
 async function fetchLivePrices(state) {
   const jobs = PRICE_SYMBOLS.map(async (sym) => {
     let price = null
@@ -55,16 +97,12 @@ async function fetchLivePrices(state) {
       const res = await fetchWithTimeout(COINBASE_SPOT(sym))
       if (res.ok) price = parseCoinbaseSpot(await res.json())
     } catch { /* lanjut */ }
-    try {
-      const res = await fetchWithTimeout(COINBASE_STATS(sym))
-      if (res.ok) {
-        const st = parseCoinbaseStats(await res.json())
-        if (st) {
-          changePct = st.changePct
-          if (price === null) price = st.last
-        }
-      }
-    } catch { /* lanjut */ }
+    const st = await fetchCoinStats(sym)
+    if (st) {
+      changePct = st.changePct
+      if (price === null) price = st.last
+    }
+    if (changePct === null) changePct = await fetchCandlesChangePct(sym)
     if (price === null && state?.lastPrices) {
       const known = state.lastPrices[sym.toLowerCase()]
       if (typeof known === 'number') return { sym, price: known, changePct, stale: true }
@@ -83,7 +121,7 @@ if (!TOKEN) {
 const tg = `https://api.telegram.org/bot${TOKEN}`
 
 function emptyState() {
-  return { offset: 0, chats: [], alerts: [], oddsAlerts: [], lastOdds: null, lastPrices: null, lastTick: null }
+  return { offset: 0, chats: [], alerts: [], oddsAlerts: [], lastOdds: null, lastPrices: null, lastTick: null, livePriceMessages: [] }
 }
 
 function loadState() {
@@ -99,6 +137,7 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
 }
 
+/** Kirim pesan bot. Return message_id (number) kalau terkirim, null kalau gagal. */
 async function sendMessage(chatId, text) {
   try {
     const res = await fetch(`${tg}/sendMessage`, {
@@ -106,9 +145,30 @@ async function sendMessage(chatId, text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text }),
     })
-    return res.ok
+    if (!res.ok) return null
+    const data = await res.json().catch(() => null)
+    return typeof data?.result?.message_id === 'number' ? data.result.message_id : null
   } catch {
-    return false
+    return null
+  }
+}
+
+/** Edit pesan bot sendiri (live /price). Return 'ok' | 'not_modified' | 'not_found' | 'error'. */
+async function editMessageText(chatId, messageId, text) {
+  try {
+    const res = await fetch(`${tg}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (res.ok && data?.ok) return 'ok'
+    const desc = String(data?.description || '')
+    if (/message is not modified/i.test(desc)) return 'not_modified'
+    if (/message to edit not found|message can't be edited|message to delete not found/i.test(desc)) return 'not_found'
+    return 'error'
+  } catch {
+    return 'error'
   }
 }
 
@@ -148,7 +208,11 @@ async function handleCommand(state, chatId, parsed) {
     case 'price': {
       const coins = await fetchLivePrices(state)
       const updated = new Date().toISOString().slice(11, 16) + ' UTC'
-      await sendMessage(chatId, formatPriceReply(coins, 'Coinbase', updated))
+      // Pesan live: dilacak lalu di-edit tiap tick selama 30 menit.
+      const messageId = await sendMessage(chatId, formatPriceReply(coins, 'Coinbase', updated, { live: true }))
+      if (typeof messageId === 'number') {
+        state.livePriceMessages = trackLivePrice(state.livePriceMessages, chatId, messageId)
+      }
       return
     }
     case 'odds': {
@@ -294,6 +358,25 @@ async function tick() {
       }
     } catch (e) {
       console.log('gamma odds check failed:', e.message)
+    }
+  }
+  // Live /price — edit pesan /price yang masih <30 menit dengan harga fresh.
+  {
+    const { live } = pruneLivePrices(state.livePriceMessages)
+    state.livePriceMessages = live
+    if (live.length > 0) {
+      const coins = await fetchLivePrices(state)
+      if (coins.length > 0) {
+        const updated = new Date().toISOString().slice(11, 16) + ' UTC'
+        const text = formatPriceReply(coins, 'Coinbase', updated, { live: true })
+        const remaining = []
+        for (const m of live) {
+          const result = await editMessageText(m.chatId, m.messageId, text)
+          if (result === 'not_found') continue
+          remaining.push(m)
+        }
+        state.livePriceMessages = remaining
+      }
     }
   }
   try {

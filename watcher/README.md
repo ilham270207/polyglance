@@ -111,6 +111,16 @@ harga, jumlah alert + chats, webhook, price source). Keyword `/alertodds`
 mengerti alias koin (`btc` = `bitcoin`, `eth` = `ethereum`, `sol` = `solana`,
 `doge` = `dogecoin`, `xrp` = `ripple`).
 
+**`/price` live-update (sejak 26 Nov 2026):** pesan balasan `/price` terus
+di-edit tiap tick cron (60 detik) selama 30 menit dengan harga fresh —
+angkanya bergerak di pesan yang sama (footer: "Live — updates every 60s
+for 30 min · send /price again for a fresh snapshot"). Satu pesan per chat
+(`/price` baru menggantikan yang lama); berhenti setelah 30 menit atau
+kalau pesannya dihapus. Scope HANYA `/price` — `/odds` tetap snapshot.
+**%24h tidak pernah hilang diam-diam** (bug 26 Nov 13:16 WIB: SOL/DOGE
+tanpa %24h sementara spot lolos semua — stats gagal sebagian): stats
+di-retry 1x, lalu fallback candle 1h, lalu tampil "(— 24h)" dengan jelas.
+
 **Mini App /app — tema putih + fitur (sejak 26 Nov 2026):** dashboard
 read-only, mobile-first, refresh 60 detik, tanpa JS: header status (jam
 update, sumber harga, status webhook), Fear & Greed Index (Alternative.me,
@@ -125,7 +135,7 @@ bagiannya tampil "unavailable" kecil — halaman lain tetap jalan. Data
 paper portfolio kacamata TIDAK tampil (ada di localStorage kacamata,
 bukan di Worker).
 
-## State di KV — 4 key terpisah (sejak 26 Nov 2026)
+## State di KV — 5 key terpisah (sejak 26 Nov 2026)
 
 KV Cloudflare itu eventually consistent: satu tick cron yang membaca
 snapshot lama lalu menyimpan ulang SELURUH blob bisa menghapus tulisan
@@ -136,8 +146,9 @@ dalam 2 menit). Karena itu state dipecah:
 - `polyglance-prices-v1`: lastPrices, lastTick, priceSource, priceError, lastOdds — ditulis HANYA oleh cron
 - `polyglance-alerts-v1`: alerts, oddsAlerts
 - `polyglance-webhook-v1`: flag webhook — ditulis HANYA oleh `/setwebhook` + verifikasi berkala
+- `polyglance-liveprice-v1`: pesan /price live `{messages: [{chatId, messageId, sentAt}]}` — ditulis webhook (saat /price) + cron (prune/edit tiap tick)
 
-`loadAll()` membaca keempatnya paralel; `saveChanged()` hanya menulis
+`loadAll()` membaca kelimanya paralel; `saveChanged()` hanya menulis
 bagian yang berubah vs snapshot. Migrasi dari blob lama (v1) otomatis saat
 baca pertama: field lama disalin ke key baru. Perintah yang masuk via
 webhook tidak lagi bisa dihapus oleh tick, dan sebaliknya.

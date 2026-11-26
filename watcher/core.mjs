@@ -539,15 +539,55 @@ export function formatAlertsList(alerts, oddsAlerts, chatId, lastPrices, lastOdd
   return `Your alerts (${all.length}):\n${lines.join('\n')}\n\nRemove one with /remove <number> — e.g. /remove 1.`
 }
 
-/** /price kaya: 5 koin + perubahan 24 jam + sumber + jam update. */
-export function formatPriceReply(coins, source, updatedAt) {
+/** /price kaya: 5 koin + perubahan 24 jam + sumber + jam update.
+ * %24h TIDAK PERNAH hilang diam-diam: kalau stats gagal (terbukti 26 Nov
+ * 13:16 WIB — SOL/DOGE tanpa %24h sementara spot lolos semua), tampilkan
+ * "(— 24h)" dengan jelas. opts.live = pesan live-update (footer). */
+export function formatPriceReply(coins, source, updatedAt, opts = {}) {
   if (!coins.length) return 'No prices right now — try again in a minute.'
   const lines = coins.map((c) => {
-    const ch = typeof c.changePct === 'number' ? ` (${c.changePct >= 0 ? '+' : ''}${c.changePct.toFixed(1)}% 24h)` : ''
+    const ch = typeof c.changePct === 'number' ? ` (${c.changePct >= 0 ? '+' : ''}${c.changePct.toFixed(1)}% 24h)` : ' (— 24h)'
     const stale = c.stale ? ' (last known)' : ''
     return `${c.sym} ${fmtPrice(c.price)}${ch}${stale}`
   })
-  return `Live prices (${source}, ${updatedAt}):\n${lines.join('\n')}`
+  let text = `Live prices (${source}, ${updatedAt}):\n${lines.join('\n')}`
+  if (opts.live) text += `\n\n${LIVE_PRICE_FOOTER}`
+  return text
+}
+
+// ---------------------------------------------------------------------------
+// Live /price — pesan /price diedit tiap tick cron (60 detik) selama 30 menit.
+// Telegram mengizinkan bot mengedit pesannya sendiri (editMessageText).
+// Satu entri per chat (pesan /price terbaru); entri disimpan di KV key
+// sendiri (polyglance-liveprice-v1) supaya tidak menimpa state lain.
+// ---------------------------------------------------------------------------
+
+/** Berapa lama pesan /price terus di-update setelah dikirim (30 menit). */
+export const LIVE_PRICE_TTL_MS = 30 * 60 * 1000
+
+/** Footer pesan /price live — memberitahu pengguna angkanya bergerak + batasnya. */
+export const LIVE_PRICE_FOOTER = 'Live — updates every 60s for 30 min · send /price again for a fresh snapshot'
+
+/**
+ * Lacak pesan /price terbaru satu chat (ganti entri lama chat yang sama —
+ * /price baru berarti pesan lama berhenti di-update). Murni.
+ * Entry: { chatId, messageId, sentAt } (sentAt = epoch ms).
+ */
+export function trackLivePrice(messages, chatId, messageId, nowMs = Date.now()) {
+  const list = (messages || []).filter((m) => m.chatId !== chatId)
+  list.push({ chatId, messageId, sentAt: nowMs })
+  return list
+}
+
+/** Buang entri live-price yang umurnya >= TTL. Return { live, expired }. */
+export function pruneLivePrices(messages, nowMs = Date.now()) {
+  const live = []
+  const expired = []
+  for (const m of messages || []) {
+    if (typeof m?.sentAt !== 'number' || nowMs - m.sentAt >= LIVE_PRICE_TTL_MS) expired.push(m)
+    else live.push(m)
+  }
+  return { live, expired }
 }
 
 /** /health kaya: alive, last check, harga, jumlah alert + chats, webhook, price source. */

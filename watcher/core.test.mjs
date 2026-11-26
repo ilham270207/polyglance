@@ -20,6 +20,10 @@ import {
   formatAlertSetReply,
   formatOddsAlertSetReply,
   formatRemovedReply,
+  trackLivePrice,
+  pruneLivePrices,
+  LIVE_PRICE_TTL_MS,
+  LIVE_PRICE_FOOTER,
   parseCoinbaseStats,
   parseCoinbaseCandles,
   aggregateCandles,
@@ -242,6 +246,31 @@ eq(priceTxt.includes('SOL $71.09 (+3.3% 24h)'), true, '/price SOL')
 eq(priceTxt.includes('DOGE $0.0567 (+4.0% 24h)'), true, '/price DOGE')
 eq(priceTxt.includes('Live prices (Coinbase, 12:40 UTC)'), true, '/price header sumber + jam')
 eq(formatPriceReply([], 'Coinbase', '12:40 UTC').includes('No prices'), true, '/price kosong -> pesan')
+// %24h TIDAK PERNAH hilang diam-diam (bug 26 Nov 13:16 WIB: SOL/DOGE tanpa %24h)
+eq(formatPriceReply([{ sym: 'SOL', price: 70.62, changePct: null }], 'Coinbase', '12:40 UTC').includes('SOL $70.62 (— 24h)'), true, '/price stats gagal -> tampil (— 24h) eksplisit')
+eq(formatPriceReply([{ sym: 'DOGE', price: 0.0565, changePct: null }], 'Coinbase', '12:40 UTC').includes('DOGE $0.0565 (— 24h)'), true, '/price DOGE tanpa stats -> (— 24h)')
+// Live /price: footer + tracking + kedaluwarsa 30 menit
+eq(LIVE_PRICE_TTL_MS, 30 * 60 * 1000, 'live TTL 30 menit')
+eq(LIVE_PRICE_FOOTER.includes('updates every 60s for 30 min'), true, 'live footer sebut 60 detik + 30 menit')
+eq(LIVE_PRICE_FOOTER.includes('send /price again'), true, 'live footer arahkan /price lagi')
+const liveTxt = formatPriceReply([{ sym: 'BTC', price: 60928, changePct: 3.1 }], 'Coinbase', '12:40 UTC', { live: true })
+eq(liveTxt.includes(LIVE_PRICE_FOOTER), true, '/price live -> ada footer')
+eq(priceTxt.includes(LIVE_PRICE_FOOTER), false, '/price biasa -> tanpa footer')
+const t0 = Date.parse('2026-11-26T12:00:00Z')
+let tracked = trackLivePrice([], 999, 11, t0)
+eq(tracked, [{ chatId: 999, messageId: 11, sentAt: t0 }], 'trackLivePrice tambah entri')
+tracked = trackLivePrice(tracked, 999, 22, t0 + 60000)
+eq(tracked, [{ chatId: 999, messageId: 22, sentAt: t0 + 60000 }], 'trackLivePrice /price baru ganti pesan lama (satu per chat)')
+tracked = trackLivePrice(tracked, 111, 33, t0 + 60000)
+eq(tracked.length, 2, 'trackLivePrice chat lain tetap ada')
+const pruned = pruneLivePrices(tracked, t0 + 29 * 60 * 1000)
+eq(pruned.live.length, 2, 'prune: <30 menit masih live')
+eq(pruned.expired.length, 0, 'prune: <30 menit tidak ada expired')
+const pruned2 = pruneLivePrices(tracked, t0 + 31 * 60 * 1000)
+eq(pruned2.live.length, 0, 'prune: >30 menit dibuang semua')
+eq(pruned2.expired.length, 2, 'prune: >30 menit masuk expired')
+eq(pruneLivePrices([{ chatId: 999, messageId: 1, sentAt: t0 }], t0 + LIVE_PRICE_TTL_MS).live.length, 0, 'prune: tepat 30 menit = expired')
+eq(pruneLivePrices([{ chatId: 999, messageId: 1 }], t0).live.length, 0, 'prune: tanpa sentAt = expired')
 const healthTxt = formatHealthReply({ lastTick: '2026-11-26T05:37:17.358Z', lastPrices: { btc: 60928, eth: 1699 }, priceSource: 'coinbase', yourPrice: 1, yourOdds: 0, chats: 1, webhookActive: true })
 eq(healthTxt.includes('Watcher alive.'), true, '/health alive')
 eq(healthTxt.includes('BTC $60,928 · ETH $1,699 (coinbase)'), true, '/health harga + sumber')
