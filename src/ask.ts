@@ -52,6 +52,17 @@ export async function askMarket(question: string): Promise<string | null> {
   }
 }
 
+/** Hapus kata pemicu "ask" di awal pertanyaan — HANYA untuk echo tampilan
+  di view ASK (F3 Lucas round-2 v8.2). Parser (voice.ts) + pertanyaan yang
+  dikirim ke Worker TIDAK berubah.
+  "ask is btc fear or greed?" -> "is btc fear or greed?".
+  "ask" saja / tanpa kata pemicu -> tidak berubah. */
+export function stripAskTrigger(question: string): string {
+  const q = question.trim()
+  const m = /^ask\s+(.+)$/i.exec(q)
+  return m ? m[1].trim() : q
+}
+
 /** Bungkus jawaban jadi baris layar <=34 karakter, maks 4 baris.
   Jawaban Worker sudah <=2 baris, tapi bungkus ulang di sini supaya aturan
   display tidak pernah dilanggar walau Worker mengirim baris panjang. */

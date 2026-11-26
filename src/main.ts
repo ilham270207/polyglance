@@ -18,9 +18,9 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { parseVoiceCommand, rmsLevel, type VoiceAction, type AlertCoin } from './voice'
-import { transcribePcm, getGroqKey, GROQ_KEY_STORAGE } from './stt'
+import { transcribePcm, getGroqKey, getSttProxyUrl, GROQ_KEY_STORAGE } from './stt'
 import { parseHlPerps, fmtFunding, fmtOi, type HlRow } from './hl'
-import { askMarket, wrapAskAnswer, getAskBaseUrl } from './ask'
+import { askMarket, wrapAskAnswer, getAskBaseUrl, stripAskTrigger } from './ask'
 import { whaleLines, type WhaleTrade } from './whales'
 import { moodLines } from './mood'
 
@@ -118,14 +118,14 @@ function askLines(): string[] {
   if (askPhase === 'asking') {
     return [
       'ASK - thinking...',
-      `"${truncate(askQuestion, 30)}"`,
+      `"${truncate(stripAskTrigger(askQuestion), 30)}"`,
       'checking live data...',
       'tap: whales >',
     ]
   }
   if (askPhase === 'answer') {
     const lines = ['ASK - answer:']
-    if (askQuestion) lines.push(`"${truncate(askQuestion, 30)}"`)
+    if (askQuestion) lines.push(`"${truncate(stripAskTrigger(askQuestion), 30)}"`)
     if (askFailed) {
       lines.push('ASK FAILED - try again')
     } else {
@@ -469,7 +469,10 @@ function voiceResult(text: string, result: string): void {
 
 async function startListening(): Promise<void> {
   if (voicePhase === 'listening' || voicePhase === 'sending') return
-  if (!getGroqKey()) {
+  // v8.3: voice jalan kalau ada key ATAU proxy. Proxy punya default
+  // (Worker publik), jadi di profil baru pun voice langsung jalan —
+  // key Groq tidak lagi wajib.
+  if (!getGroqKey() && !getSttProxyUrl()) {
     voiceResult('', 'NO GROQ KEY - see settings')
     return
   }
@@ -514,7 +517,10 @@ async function stopListening(send: boolean): Promise<void> {
     return
   }
   const key = getGroqKey()
-  if (!key) {
+  // v8.3: tanpa key pun boleh kirim — transcribePcm langsung ke proxy
+  // (key Groq dipegang Worker secret). Gate hanya kalau proxy juga tidak
+  // ada (tidak mungkin terjadi selama default v8.3 ada).
+  if (!key && !getSttProxyUrl()) {
     voiceResult('', 'NO GROQ KEY - see settings')
     return
   }
@@ -523,7 +529,7 @@ async function stopListening(send: boolean): Promise<void> {
   console.log(`voice sending ${bytes} bytes to groq`)
   const text = await transcribePcm(concatPcm(chunks), key)
   if (text === null) {
-    voiceResult('', 'STT FAILED - check key + net')
+    voiceResult('', key ? 'STT FAILED - check key + net' : 'STT FAILED - check net')
     return
   }
   if (text === '') {
@@ -720,7 +726,9 @@ function voiceLines(): string[] {
     return lines
   }
   // idle
-  if (!getGroqKey()) {
+  // v8.3: tanpa key pun voice jalan via proxy default — cabang ini hanya
+  // tampil kalau key DAN proxy sama-sama tidak ada.
+  if (!getGroqKey() && !getSttProxyUrl()) {
     return [
       'VOICE - push to talk',
       'no groq key set',

@@ -20,6 +20,13 @@ const GROQ_MODEL = 'whisper-large-v3-turbo'
 export const GROQ_KEY_STORAGE = 'polyglance.groq-key.v1'
 export const STT_PROXY_STORAGE = 'polyglance.stt-proxy.v1'
 
+/** Default proxy STT (v8.3): Worker publik PolyGlance. URL ini BUKAN secret —
+  endpoint /stt tidak butuh key dari client (Groq key dipegang Worker
+  secret). Dengan default ini, voice jalan di profil kacamata baru tanpa
+  setup apa pun; user tetap bisa override lewat settings (nilai tersimpan
+  menang atas default). */
+export const DEFAULT_STT_PROXY_URL = 'https://polyglance-watcher.danham322.workers.dev/stt'
+
 export function getGroqKey(): string | null {
   try {
     return localStorage.getItem(GROQ_KEY_STORAGE) || null
@@ -29,21 +36,23 @@ export function getGroqKey(): string | null {
 }
 
 /**
- * URL proxy STT (Cloudflare Worker, .../stt) atau null kalau tidak diset.
+ * URL proxy STT (Cloudflare Worker, .../stt). v8.3: kalau tidak ada nilai
+ * tersimpan (atau tersimpan tapi bukan URL), pakai DEFAULT_STT_PROXY_URL
+ * (Worker publik) — proxy tidak pernah "mati" karena lupa diset.
  * Normalisasi: buang spasi + trailing slash; kalau belum berakhiran /stt,
  * tambahkan (jadi boleh tempel URL root Worker saja).
  */
-export function getSttProxyUrl(): string | null {
+export function getSttProxyUrl(): string {
   try {
     const raw =
       (typeof localStorage !== 'undefined' ? localStorage.getItem(STT_PROXY_STORAGE) : null) || ''
     let url = raw.trim().replace(/\/+$/, '')
-    if (!url) return null
-    if (!/^https?:\/\//i.test(url)) return null
+    if (!url) return DEFAULT_STT_PROXY_URL
+    if (!/^https?:\/\//i.test(url)) return DEFAULT_STT_PROXY_URL
     if (!/\/stt$/i.test(url)) url += '/stt'
     return url
   } catch {
-    return null
+    return DEFAULT_STT_PROXY_URL
   }
 }
 
@@ -129,15 +138,18 @@ export async function transcribeViaProxy(pcm: Uint8Array, proxyUrl: string): Pro
 
 /**
  * Kirim PCM mentah (16 kHz s16le mono, diakumulasi dari audioEvent) ke Groq.
- * 1. Coba direct dulu (25 detik). Sukses — termasuk transcript kosong — selesai.
- * 2. Kalau direct gagal DAN proxy URL terisi di settings -> coba proxy (30 detik).
+ * Dengan key: coba direct dulu (25 detik). Sukses — termasuk transcript
+ * kosong — selesai; kalau direct gagal, coba proxy (30 detik).
+ * Tanpa key (v8.3, profil baru): LANGSUNG ke proxy — key Groq dipegang
+ * Worker secret, jadi direct tidak dicoba sama sekali (direct tanpa key
+ * pasti 401, dan dari WebView kacamata bisa hang 25 detik sebelum gagal).
  * Return transcript (string kosong kalau Whisper tidak mendengar apa-apa),
  * atau null kalau semua jalur gagal.
  */
-export async function transcribePcm(pcm: Uint8Array, apiKey: string): Promise<string | null> {
-  const direct = await transcribeDirect(pcm, apiKey)
-  if (direct !== null) return direct
-  const proxyUrl = getSttProxyUrl()
-  if (!proxyUrl) return null
-  return transcribeViaProxy(pcm, proxyUrl)
+export async function transcribePcm(pcm: Uint8Array, apiKey: string | null): Promise<string | null> {
+  if (apiKey) {
+    const direct = await transcribeDirect(pcm, apiKey)
+    if (direct !== null) return direct
+  }
+  return transcribeViaProxy(pcm, getSttProxyUrl())
 }

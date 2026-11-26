@@ -32,7 +32,7 @@
     <div id="app">Companion app is running. Check the glasses display.</div>
     <div id="settings">
       <h2>PolyGlance settings</h2>
-      <p class="hint">Voice commands use Groq Whisper. Your key stays on this phone only (localStorage) &mdash; it is never sent anywhere except api.groq.com for transcription (or your own Worker proxy below, if set).</p>
+      <p class="hint">Voice commands use Groq Whisper. Your key stays on this phone only (localStorage) &mdash; it is never sent anywhere except api.groq.com for transcription. Without a key, voice goes through the built-in Worker proxy below &mdash; no key needed.</p>
       <label for="groq-key">Groq API key</label>
       <input id="groq-key" type="password" placeholder="gsk_..." autocomplete="off" />
       <div class="row">
@@ -41,13 +41,13 @@
       </div>
       <p id="groq-status" class="status">Groq key: not set</p>
       <label for="stt-proxy">STT proxy URL (optional)</label>
-      <input id="stt-proxy" type="url" placeholder="https://polyglance-watcher.xxx.workers.dev/stt" autocomplete="off" />
+      <input id="stt-proxy" type="url" placeholder="https://polyglance-watcher.danham322.workers.dev/stt" autocomplete="off" />
       <div class="row">
         <button id="stt-proxy-save">Save proxy</button>
-        <button id="stt-proxy-clear">Clear proxy</button>
+        <button id="stt-proxy-clear">Use default</button>
       </div>
-      <p id="stt-proxy-status" class="status">STT proxy: not set</p>
-      <p class="hint">Only used when the direct Groq call fails or times out (Cloudflare sometimes blocks the glasses WebView). The proxy is your own Cloudflare Worker &mdash; it forwards audio to Groq with its own key, so the glasses never need a direct connection to Groq. Leave empty to disable.</p>
+      <p id="stt-proxy-status" class="status">STT proxy: default</p>
+      <p class="hint">Used when the direct Groq call fails or times out (Cloudflare sometimes blocks the glasses WebView) &mdash; and as the only path when no Groq key is set. The default proxy is the PolyGlance Cloudflare Worker; it forwards audio to Groq with its own key, so the glasses never need a key. Leave empty to use the default, or paste your own Worker /stt URL to override.</p>
       <h2>Test voice command</h2>
       <p class="hint">Runs the same parser as the glasses mic &mdash; no key needed. Try it without speaking.</p>
       <input id="voice-test" type="text" placeholder="buy 100 bitcoin" autocomplete="off" />
@@ -118,7 +118,7 @@
         function refreshProxyStatus() {
           try {
             var p = localStorage.getItem(PROXY_KEY);
-            proxyStatus.textContent = p ? 'STT proxy: set (' + p + ')' : 'STT proxy: not set (direct only)';
+            proxyStatus.textContent = p ? 'STT proxy: custom (' + p + ')' : 'STT proxy: default (polyglance-watcher.danham322.workers.dev/stt)';
           } catch (e) { proxyStatus.textContent = 'STT proxy: storage unavailable'; }
         }
         document.getElementById('stt-proxy-save').addEventListener('click', function () {

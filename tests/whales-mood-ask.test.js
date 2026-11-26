@@ -106,5 +106,14 @@ eq(ask.wrapAskAnswer('a'.repeat(200)).length, 1, 'wrap kata super panjang -> 1 b
 eq(ask.wrapAskAnswer('a'.repeat(200))[0].length, 34, 'wrap kata super panjang = 34 char')
 eq(ask.getAskBaseUrl(), 'https://polyglance-watcher.danham322.workers.dev', 'ask base url fallback (tanpa settings)')
 
+// --- ASK: strip kata pemicu "ask" dari echo tampilan (F3, v8.3) ---
+eq(ask.stripAskTrigger('ask is btc fear or greed?'), 'is btc fear or greed?', 'strip ask di awal')
+eq(ask.stripAskTrigger('ask why is bitcoin down'), 'why is bitcoin down', 'strip ask + why')
+eq(ask.stripAskTrigger('Ask IS btc fear or greed?'), 'IS btc fear or greed?', 'strip ask kapital, sisa utuh')
+eq(ask.stripAskTrigger('why is bitcoin down?'), 'why is bitcoin down?', 'tanpa pemicu -> utuh')
+eq(ask.stripAskTrigger('ask'), 'ask', 'ask saja -> utuh')
+eq(ask.stripAskTrigger('askew question here'), 'askew question here', 'askew bukan pemicu')
+eq(ask.stripAskTrigger('  ask is btc up?  '), 'is btc up?', 'strip + trim spasi')
+
 console.log(`\nwhales-mood-ask: ${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

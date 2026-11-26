@@ -24,7 +24,7 @@ execSync(
   { cwd: ROOT, stdio: 'pipe' },
 )
 const stt = await import(pathToFileURL(join(outDir, 'stt.js')).href)
-const { transcribePcm, getSttProxyUrl, setSttProxyUrl } = stt
+const { transcribePcm, getSttProxyUrl, setSttProxyUrl, DEFAULT_STT_PROXY_URL } = stt
 
 // --- stub localStorage (Node tidak punya) ---
 const store = new Map()
@@ -83,11 +83,12 @@ reset(PROXY)
 behavior = (url) => (url.includes('api.groq.com') ? errStatus(500) : okJson('show odds'))
 eq(await transcribePcm(PCM, 'gsk_test'), 'show odds', 'direct 500: fallback ke proxy')
 
-// 4. Direct gagal + proxy kosong -> null, fetch 1x
+// 4. Direct gagal + proxy default juga gagal -> null, fetch 2x (v8.3:
+// "tanpa proxy" tidak ada lagi — reset(null) = proxy default Worker)
 reset(null)
 behavior = () => { throw new Error('network down') }
-eq(await transcribePcm(PCM, 'gsk_test'), null, 'tanpa proxy: gagal -> null')
-eq(calls.length, 1, 'tanpa proxy: fetch 1x saja')
+eq(await transcribePcm(PCM, 'gsk_test'), null, 'direct gagal + default proxy gagal -> null')
+eq(calls.length, 2, 'direct gagal + default proxy gagal: fetch 2x')
 
 // 5. Direct '' (Whisper tidak mendengar apa-apa) -> proxy TIDAK dipanggil
 reset(PROXY)
@@ -101,17 +102,31 @@ behavior = (url) => (url.includes('api.groq.com') ? (() => { throw new Error('do
 eq(await transcribePcm(PCM, 'gsk_test'), null, 'proxy gagal juga -> null')
 eq(calls.length, 2, 'proxy gagal juga: fetch 2x')
 
-// 7. Normalisasi URL proxy
+// 7. Normalisasi URL proxy (v8.3: kosong/bukan URL -> default, bukan null)
 reset('https://polyglance-watcher.test.workers.dev/stt/')
 eq(getSttProxyUrl(), PROXY, 'trailing slash dibuang')
 reset('https://polyglance-watcher.test.workers.dev')
 eq(getSttProxyUrl(), PROXY, 'tanpa /stt -> ditambah')
 reset('not-a-url')
-eq(getSttProxyUrl(), null, 'bukan URL -> null')
+eq(getSttProxyUrl(), DEFAULT_STT_PROXY_URL, 'bukan URL -> default')
 reset('')
-eq(getSttProxyUrl(), null, 'kosong -> null (proxy mati)')
+eq(getSttProxyUrl(), DEFAULT_STT_PROXY_URL, 'kosong -> default (proxy hidup)')
 reset('   https://polyglance-watcher.test.workers.dev/stt   ')
 eq(getSttProxyUrl(), PROXY, 'spasi di ujung dibuang')
+eq(DEFAULT_STT_PROXY_URL, 'https://polyglance-watcher.danham322.workers.dev/stt', 'default = Worker publik')
+
+// 8. Tanpa key (v8.3, profil baru): direct DISKIP, langsung ke proxy default
+reset(null)
+behavior = (url) => (url.includes('api.groq.com') ? (() => { throw new Error('must not be called') })() : okJson('show whales'))
+eq(await transcribePcm(PCM, null), 'show whales', 'tanpa key: langsung proxy, direct diskip')
+eq(calls.length, 1, 'tanpa key: fetch 1x (proxy saja)')
+eq(calls[0].url, DEFAULT_STT_PROXY_URL, 'tanpa key: ke proxy default')
+
+// 9. Tanpa key + proxy gagal -> null, fetch 1x
+reset(null)
+behavior = () => { throw new Error('down') }
+eq(await transcribePcm(PCM, null), null, 'tanpa key + proxy gagal -> null')
+eq(calls.length, 1, 'tanpa key + proxy gagal: fetch 1x')
 
 console.log(`stt-fallback: ${pass} pass, ${fail} fail`)
 process.exit(fail === 0 ? 0 : 1)
