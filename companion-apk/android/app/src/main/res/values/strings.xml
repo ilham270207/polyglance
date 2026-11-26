@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PolyGlance</string>
+    <string name="title_activity_main">PolyGlance</string>
+    <string name="package_name">com.ilham270207.polyglance</string>
+    <string name="custom_url_scheme">com.ilham270207.polyglance</string>
+</resources>

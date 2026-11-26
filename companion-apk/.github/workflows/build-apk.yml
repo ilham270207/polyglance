@@ -1,0 +1,64 @@
+# Build PolyGlance Companion APK (debug)
+#
+# Copy this file to the REPO ROOT at .github/workflows/build-apk.yml
+# (it lives here inside companion-apk/ as a ready-to-copy file).
+# The companion-apk/ folder itself is also copied to the repo root.
+#
+# Triggers: manual (Actions -> Build Companion APK -> Run workflow)
+#           or any push that touches companion-apk/**
+# Output: artifact "polyglance-companion-v1.apk" (debug APK, unsigned,
+#         sideloadable — enough for the hackathon demo).
+
+name: Build Companion APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'companion-apk/**'
+
+jobs:
+  build-apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: companion-apk/package-lock.json
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: companion-apk
+        run: npm ci
+
+      - name: Sync Capacitor
+        working-directory: companion-apk
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: companion-apk/android
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: cp companion-apk/android/app/build/outputs/apk/debug/app-debug.apk polyglance-companion-v1.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: polyglance-companion-v1.apk
+          path: polyglance-companion-v1.apk
+          if-no-files-found: error
