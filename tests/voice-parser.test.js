@@ -100,6 +100,12 @@ eq(parseVoiceCommand('set alert eth 1800'), { type: 'set-alert', target: 1800, c
 eq(parseVoiceCommand('show portfolio'), { type: 'goto', view: 'paper-btc' }, 'show portfolio')
 eq(parseVoiceCommand('check portfolio'), { type: 'goto', view: 'paper-btc' }, 'check portfolio')
 
+// --- hyperliquid (v8) ---
+eq(parseVoiceCommand('show hyperliquid'), { type: 'goto', view: 'hl' }, 'show hyperliquid')
+eq(parseVoiceCommand('hyperliquid'), { type: 'goto', view: 'hl' }, 'hyperliquid saja')
+eq(parseVoiceCommand('show perps'), { type: 'goto', view: 'hl' }, 'show perps')
+eq(parseVoiceCommand('show hl'), { type: 'goto', view: 'hl' }, 'show hl')
+
 // --- stop & tidak dikenal ---
 eq(parseVoiceCommand('stop'), { type: 'stop' }, 'stop')
 eq(parseVoiceCommand('cancel'), { type: 'stop' }, 'cancel')

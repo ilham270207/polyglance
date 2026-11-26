@@ -1,10 +1,10 @@
 # PolyGlance
 
 A smart-glasses app for the Even Realities G2 that lets crypto holders check
-prices, prediction-market odds, a virtual portfolio, and price alerts at a
-glance — with **voice commands** and **Telegram alerts** that keep working
-when the glasses app is closed — built for the **Heads Up: Even Realities
-Hackathon** (track: **Crypto & DeFi**), solo by
+prices, prediction-market odds, Hyperliquid perps, a virtual portfolio, and
+price alerts at a glance — with **voice commands** and **Telegram alerts**
+that keep working when the glasses app is closed — built for the **Heads Up:
+Even Realities Hackathon** (track: **Crypto & DeFi**), solo by
 [@ilham270207](https://github.com/ilham270207).
 
 > **Data only — not financial advice. Virtual money, no real funds.**
@@ -22,7 +22,8 @@ One page, one full-screen text container (576×288, green monochrome).
 | **PAPER-ETH** | Same shared cash, ETH holding, total, P/L | Buy $100 ETH / sell $100 ETH |
 | **ALERTS** | Price alerts for BTC, ETH and SOL (v6): per-asset target + status (WAITING / `BTC HIT $X!`); Telegram bot row `@polyglance_alerts_bot`; **double-tap switches asset** | Target step per asset (BTC $1,000 / ETH $100 / SOL $10) |
 | **ODDS-ALERT** | Odds alert (v7): alarm when a Polymarket market's YES % crosses a threshold; status WAITING / TRIGGERED! / OFF; **double-tap switches market** | Threshold step 5% (swipe down to 0 cancels) |
-| **VOICE** | Push-to-talk voice commands via Groq Whisper (v6: `sell all bitcoin`, `show portfolio`, `cancel alert`, `buy 100 bitcoin`, `set alert 58000`; v7: `set odds alert 60`); live mic level meter | Start/stop listening / cancel |
+| **HL** | Hyperliquid perps (v8): BTC/ETH/SOL perp price + 24h change, funding rate, open interest — read-only, no wallet, no trading | Manual refresh |
+| **VOICE** | Push-to-talk voice commands via Groq Whisper (v6: `sell all bitcoin`, `show portfolio`, `cancel alert`, `buy 100 bitcoin`, `set alert 58000`; v7: `set odds alert 60`; v8: `show hyperliquid`); live mic level meter | Start/stop listening / cancel |
 
 - Paper trades are stored in `localStorage` (`polyglance.paper.v2`, migrated
   from v1 `{cash, btc}` with ETH starting at 0), so the portfolio survives
@@ -44,6 +45,11 @@ One page, one full-screen text container (576×288, green monochrome).
   (`/alertodds btc dip above 60`). Every ODDS refresh checks the alert;
   on crossing, the glasses show `TRIGGERED!` and jump to the ODDS-ALERT
   view. A cancelled alert is never re-armed.
+- **Hyperliquid perps (v8):** the HL view shows BTC/ETH/SOL perp prices with
+  24h change, funding rate per hour and open interest in USD, from the public
+  Hyperliquid API (`POST /info`, `metaAndAssetCtxs` — one call, no key).
+  Read-only: no wallet, no orders, no signing. If the fetch fails, the view
+  keeps the last data with `OFFLINE - last data` (same pattern as TICKER).
 - If a fetch fails, the app keeps showing the last data with an
   `OFFLINE - last data` line instead of going blank.
 - All on-glasses text is plain ASCII (max 8 lines, 34 chars per line).
@@ -53,11 +59,12 @@ One page, one full-screen text container (576×288, green monochrome).
 - **Voice commands (VOICE view):** push-to-talk on the glasses mic
   (`g2-microphone` permission). Audio is transcribed with Groq Whisper
   (`whisper-large-v3-turbo`) and run through a local command parser
-  (`src/voice.ts`, 70/70 unit tests) — the same parser the settings-page
+  (`src/voice.ts`, 74/74 unit tests) — the same parser the settings-page
   command chips use, so commands are testable without speaking. New in v6:
   `sell all bitcoin` / `sell all`, `show portfolio`, and `cancel alert`.
   New in v7: `set odds alert above 60` / `odds alert below 40` /
-  `cancel odds alert` (threshold validated 5–95).
+  `cancel odds alert` (threshold validated 5–95). New in v8:
+  `show hyperliquid` / `show perps` (opens the HL view).
   Without a Groq key the view explains how to set one.
 - **Your key stays on your phone:** the Groq API key is entered in the
   companion settings page and stored in `localStorage` only — it is never
@@ -101,9 +108,13 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 *ALERTS (v6) — price alert for ETH (target $1,800, WAITING) with the Telegram bot row (`@polyglance_alerts_bot`); double-tap switches asset (BTC → ETH → SOL).*
 
+![HL — Hyperliquid perps](images/frame-hl.png)
+
+*HL (v8) — Hyperliquid perp prices (BTC/ETH/SOL) with funding rate and open interest, read-only, no wallet.*
+
 ## Demo
 
-▶️ [Watch the 86-second demo on YouTube](https://www.youtube.com/watch?v=7jwChwKZxKQ) — "PolyGlance — Crypto at a Glance on Even Realities G2 (Voice + Telegram)": TICKER, ODDS, paper trading, ALERTS, a live voice command, and the Telegram bot in action.
+▶️ [Watch the 109-second demo on YouTube](https://www.youtube.com/watch?v=sYCcHEM65EI) — "PolyGlance — Crypto at a Glance on Even Realities G2 (Voice + Telegram)": TICKER, ODDS, paper trading, ALERTS, a live voice command, and the Telegram bot in action.
 
 ## Tech stack
 
@@ -113,6 +124,7 @@ Glasses display (576×288), captured in the Even Hub simulator.
 - **Core app: no backend, no API keys.** Data comes straight from public APIs:
   - [CoinGecko](https://api.coingecko.com/api/v3/simple/price) — BTC/ETH/SOL/DOGE/XRP prices
   - [Polymarket Gamma API](https://gamma-api.polymarket.com/markets) — market odds
+  - [Hyperliquid API](https://api.hyperliquid.xyz/info) — BTC/ETH/SOL perp prices, funding, open interest (v8)
 - **Voice (optional):** your own Groq API key, stored on-phone only (see
   above). **Telegram alerts (optional):** Cloudflare Worker in `watcher/`
   (free tier, cron every minute; secrets via `wrangler secret put`).
@@ -146,26 +158,28 @@ Notes:
 - The simulator is a native desktop window and does not run in Termux —
   coding + `npm run dev` + `npm run build` work from Termux on Android,
   simulator testing needs a PC.
-- `app.json` whitelists the two API domains under the `network` permission.
+- `app.json` whitelists the three API domains under the `network` permission
+  (CoinGecko, Polymarket Gamma, Hyperliquid).
 
 ## Install (.ehpk)
 
-`polyglance.ehpk` (in this repo) is the packaged v7 app — load it in the
+`polyglance.ehpk` (in this repo) is the packaged v8 app — load it in the
 Even Hub simulator or the Even App to try it without building.
 
 ## Project structure
 
 ```
 app.json          # Even Hub manifest (package id, SDK version, network whitelist, g2-microphone)
-src/main.ts       # Whole app: bridge setup, 7 views, paper trade BTC+ETH, price alerts, odds alerts, voice
+src/main.ts       # Whole app: bridge setup, 8 views, paper trade BTC+ETH, price alerts, odds alerts, voice, Hyperliquid perps
 src/voice.ts      # Voice command parser + PCM-to-WAV + mic level (unit-tested)
+src/hl.ts         # Hyperliquid perps parser + funding/OI formatters (unit-tested)
 src/stt.ts        # Groq Whisper STT + Worker proxy fallback (unit-tested)
 index.html        # Vite entry + companion settings page (Groq key, STT proxy URL, test chips)
 vite.config.ts    # Vite config (template)
 images/           # Simulator screenshots (TICKER / ODDS / PAPER / VOICE / ALERTS)
 watcher/          # Telegram bot + price watcher (Cloudflare Worker, Node fallback, tests)
-tests/            # Unit tests: voice parser (70), STT fallback (18), watcher core (53)
-polyglance.ehpk   # Packaged v7 app for the simulator / Even App
+tests/            # Unit tests: voice parser (74), HL parser (28), STT fallback (18), watcher core (174)
+polyglance.ehpk   # Packaged v8 app for the simulator / Even App
 ```
 
 ## Submission

@@ -5,7 +5,7 @@
 
 export type Coin = 'BTC' | 'ETH'
 export type AlertCoin = 'BTC' | 'ETH' | 'SOL'
-export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'voice'
+export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice'
 
 export type VoiceAction =
   | { type: 'goto'; view: VoiceView }
@@ -167,6 +167,7 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
   // Pindah view
   if (has('ticker', 'price', 'prices')) return { type: 'goto', view: 'ticker' }
   if (has('odds', 'polymarket', 'bets', 'betting')) return { type: 'goto', view: 'odds' }
+  if (has('hyperliquid', 'hl', 'perps', 'perp')) return { type: 'goto', view: 'hl' }
   if (has('paper', 'portfolio', 'trading', 'trade')) return { type: 'goto', view: 'paper-btc' }
   if (has('voice')) return { type: 'goto', view: 'voice' }
 

@@ -7,11 +7,12 @@
   "package_id": "com.ilham270207.polyglance",
   "permissions": [
     {
-      "desc": "Fetch BTC/ETH prices and Polymarket odds",
+      "desc": "Fetch BTC/ETH prices, Polymarket odds and Hyperliquid perps",
       "name": "network",
       "whitelist": [
         "https://api.coingecko.com",
         "https://gamma-api.polymarket.com",
+        "https://api.hyperliquid.xyz",
         "https://api.groq.com"
       ]
     },

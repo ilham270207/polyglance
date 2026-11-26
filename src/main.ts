@@ -1,13 +1,8 @@
-// PolyGlance v7 - 7 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram
-// v6: ALERTS multi-aset (BTC/ETH/SOL, ganti aset = double-tap di view ALERTS),
-// TICKER 5 koin (BTC/ETH/SOL/DOGE/XRP), perintah suara baru (sell all,
-// show/check portfolio, cancel/remove alert).
-// v7: ODDS ALERT — alarm saat YES% sebuah market Polymarket melewati ambang.
-// View ODDS-ALERT: swipe up/down geser ambang +-5% (swipe pertama dari OFF:
-// up = di atas YES sekarang, down = di bawah YES sekarang), double-tap =
-// ganti pasar. Satu odds alert aktif (terakhir diset yang menang).
+// PolyGlance v8 - 8 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram + HYPERLIQUID
+// v8: view HL — harga perp BTC/ETH/SOL + funding + open interest dari API
+// publik Hyperliquid (read-only, tanpa wallet, tanpa trading).
 // Tap = pindah view (TICKER -> ODDS -> PAPER-BTC -> PAPER-ETH -> ALERTS ->
-// ODDS-ALERT -> VOICE -> TICKER).
+// ODDS-ALERT -> HL -> VOICE -> TICKER).
 // Double-tap = keluar (kecuali di view ALERTS: ganti aset; di view ODDS-ALERT:
 // ganti pasar). Swipe up/down = aksi per view.
 // View VOICE: push-to-talk. Swipe up = mulai dengar, swipe up lagi = stop & kirim
@@ -23,6 +18,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { parseVoiceCommand, rmsLevel, type VoiceAction, type AlertCoin } from './voice'
 import { transcribePcm, getGroqKey, GROQ_KEY_STORAGE } from './stt'
+import { parseHlPerps, fmtFunding, fmtOi, type HlRow } from './hl'
 
 const bridge = await waitForEvenAppBridge()
 
@@ -51,7 +47,7 @@ function truncate(s: string, max: number): string {
 }
 
 // ---------- state ----------
-type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'voice'
+type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice'
 let view: View = 'ticker'
 
 interface Prices {
@@ -71,6 +67,13 @@ let offline = false
 interface Market { question: string; yesPct: number; vol24h: number }
 let markets: Market[] = []
 let oddsPage = 0
+
+// ---------- hyperliquid perps (v8, read-only) ----------
+// Harga perp + funding + open interest BTC/ETH/SOL dari API publik
+// Hyperliquid. Gagal fetch = tampilkan data terakhir (hlOffline) —
+// JANGAN pernah mengosongkan view atau mengganggu view lain.
+let hlRows: HlRow[] | null = null
+let hlOffline = false
 
 // ---------- paper trade (BTC + ETH, cash bersama) ----------
 const PAPER_KEY_V2 = 'polyglance.paper.v2'
@@ -607,6 +610,7 @@ function voiceLines(): string[] {
     'say: sell all bitcoin',
     'say: show portfolio',
     'say: set odds alert 60',
+    'say: show hyperliquid',
     'up: start listening',
     'dn: back',
     'tap: ticker >',
@@ -675,8 +679,26 @@ function buildContent(): string {
     return oddsAlertLines().join('\n')
   }
 
+  if (view === 'hl') {
+    return hlLines().join('\n')
+  }
+
   // voice
   return voiceLines().join('\n')
+}
+
+/** Isi view HL (8 baris): header + per koin (harga + %24h, funding + OI).
+  Belum ada data -> loading. Fetch gagal tapi data lama ada -> data lama
+  + baris terakhir 'OFFLINE - last data' (pola yang sama dengan TICKER). */
+function hlLines(): string[] {
+  if (!hlRows) return ['HL - HYPERLIQUID PERPS', 'loading perps...', 'tap: voice >']
+  const lines = ['HL - HYPERLIQUID PERPS']
+  for (const r of hlRows) {
+    lines.push(`${r.sym} ${fmtCoinPrice(r.sym, r.mark)}  ${fmtChg(r.chg)}`)
+    lines.push(`fund ${fmtFunding(r.funding)} OI ${fmtOi(r.oiUsd)}`)
+  }
+  lines.push(hlOffline ? 'OFFLINE - last data' : 'tap: voice >')
+  return lines
 }
 
 /** Isi view ODDS-ALERT (8 baris). Menampilkan pasar yang dipilih + ambang
@@ -684,7 +706,7 @@ function buildContent(): string {
   status OFF — swipe up/down akan membuat alert BARU di pasar ini. */
 function oddsAlertLines(): string[] {
   const m = selectedOddsMarket()
-  if (!m) return ['ODDS ALERT', 'loading markets...', 'tap: voice >']
+  if (!m) return ['ODDS ALERT', 'loading markets...', 'tap: hl >']
   const label = shortOddsQuestion(m.question)
   const isMine = oddsAlert.question === m.question && oddsAlert.threshold > 0
   const statusLine = !isMine
@@ -703,7 +725,7 @@ function oddsAlertLines(): string[] {
     statusLine,
     'up: +5%  dn: -5%',
     'dbl-tap: next market',
-    'tap: voice >',
+    'tap: hl >',
   ]
 }
 
@@ -881,9 +903,37 @@ function checkOddsAlert(): void {
   }
 }
 
+// ---------- hyperliquid perps ----------
+// Pola yang sama dengan ODDS: fetch langsung dari WebView (api.
+// hyperliquid.xyz mengizinkan CORS: Access-Control-Allow-Origin: *).
+// Satu panggilan metaAndAssetCtxs berisi semua yang dibutuhkan.
+// Timeout 8 detik + try/catch sendiri: gagal di sini TIDAK BOLEH
+// menghentikan refreshAll atau view lain.
+async function fetchHl(): Promise<void> {
+  try {
+    const res = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+      signal: AbortSignal.timeout(8000),
+    })
+    console.log('hyperliquid status:', res.status)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const rows = parseHlPerps(await res.json())
+    if (!rows) throw new Error('bad payload')
+    hlRows = rows
+    hlOffline = false
+    console.log('hyperliquid rows:', rows.length)
+  } catch (err) {
+    console.log('hyperliquid fetch failed:', err)
+    hlOffline = true
+  }
+}
+
 async function refreshAll(): Promise<void> {
   await fetchPrices()
   await fetchOdds()
+  await fetchHl()
   checkAlert()
   checkOddsAlert()
   render()
@@ -918,7 +968,7 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
   return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
 }
 
-const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'voice']
+const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'hl', 'voice']
 
 function cancelListeningSync(): void {
   // Dipanggil saat pindah view / keluar: matikan mic, buang rekaman.
@@ -1130,7 +1180,7 @@ function swipeUp(): void {
     if (voicePhase === 'result') { voicePhase = 'idle'; void startListening(); return }
     return
   }
-  if (view === 'ticker') { void refreshAll(); return }
+  if (view === 'ticker' || view === 'hl') { void refreshAll(); return }
   if (view === 'odds') {
     const pages = Math.max(1, Math.ceil(markets.length / 3))
     oddsPage = (oddsPage - 1 + pages) % pages
@@ -1150,7 +1200,7 @@ function swipeDown(): void {
     prevView()
     return
   }
-  if (view === 'ticker') { void refreshAll(); return }
+  if (view === 'ticker' || view === 'hl') { void refreshAll(); return }
   if (view === 'odds') {
     const pages = Math.max(1, Math.ceil(markets.length / 3))
     oddsPage = (oddsPage + 1) % pages
