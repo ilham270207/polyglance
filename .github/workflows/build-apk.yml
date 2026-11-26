@@ -38,7 +38,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK (manual — setup-android@v3 is broken: it asks sdkmanager for the obsolete 'tools' package)
+      - name: Install Android SDK (manual)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq unzip
           mkdir -p "$HOME/android-sdk/cmdline-tools"
