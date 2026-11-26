@@ -421,9 +421,13 @@ export function candlesSvg(candles, { width = 640, height = 180 } = {}) {
     parts.push(`<line x1="${cx.toFixed(1)}" y1="${y(c.high).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${y(c.low).toFixed(1)}" stroke="${color}" stroke-width="1.5"/>`)
     parts.push(`<rect x="${(cx - bodyW / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${h.toFixed(1)}" fill="${color}"><title>O ${fmtPrice(c.open)} · H ${fmtPrice(c.high)} · L ${fmtPrice(c.low)} · C ${fmtPrice(c.close)}</title></rect>`)
   })
-  const fmtT = (t) => new Date(t * 1000).toISOString().slice(11, 13) + ':00'
-  parts.push(`<text x="${padL}" y="${height - 5}" font-size="10" fill="#6b7280">${fmtT(candles[0].t)} UTC</text>`)
-  parts.push(`<text x="${width - padR}" y="${height - 5}" font-size="10" fill="#6b7280" text-anchor="end">${fmtT(candles[candles.length - 1].t)} UTC</text>`)
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const fmtT = (t) => {
+    const d = new Date(t * 1000)
+    return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${String(d.getUTCHours()).padStart(2, '0')}:00 UTC`
+  }
+  parts.push(`<text x="${padL}" y="${height - 5}" font-size="10" fill="#6b7280">${fmtT(candles[0].t)}</text>`)
+  parts.push(`<text x="${width - padR}" y="${height - 5}" font-size="10" fill="#6b7280" text-anchor="end">${fmtT(candles[candles.length - 1].t)}</text>`)
   parts.push('</svg>')
   return parts.join('')
 }
