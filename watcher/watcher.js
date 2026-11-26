@@ -11,14 +11,22 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   fmtUsd,
-  parseBotCommand,
+  friendlyReply,
   checkAlertCrossings,
   checkOddsAlertCrossings,
   findOddsMarket,
   oddsYesByQuestion,
-  formatOddsTop,
+  formatOddsRich,
+  formatAlertsList,
+  formatPriceReply,
+  formatHealthReply,
+  formatAlertSetReply,
+  formatOddsAlertSetReply,
+  formatRemovedReply,
+  myAlerts,
   parseCoinGeckoPrices,
   parseCoinbaseSpot,
+  parseCoinbaseStats,
   HELP_TEXT,
 } from './core.mjs'
 
@@ -28,8 +36,44 @@ const COINGECKO_URL =
   'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd'
 const COINBASE_BTC_URL = 'https://api.coinbase.com/v2/prices/BTC-USD/spot'
 const COINBASE_ETH_URL = 'https://api.coinbase.com/v2/prices/ETH-USD/spot'
+const COINBASE_SPOT = (sym) => `https://api.coinbase.com/v2/prices/${sym}-USD/spot`
+const COINBASE_STATS = (sym) => `https://api.exchange.coinbase.com/products/${sym}-USD/stats`
+const PRICE_SYMBOLS = ['BTC', 'ETH', 'SOL', 'DOGE', 'XRP']
 const GAMMA_URL =
   'https://gamma-api.polymarket.com/markets?limit=100&active=true&closed=false&order=volume24hr&ascending=false'
+
+async function fetchWithTimeout(url, ms = 8000) {
+  return fetch(url, { signal: AbortSignal.timeout(ms) })
+}
+
+/** Harga live 5 koin untuk /price — sama seperti worker.js (spot + stats Coinbase). */
+async function fetchLivePrices(state) {
+  const jobs = PRICE_SYMBOLS.map(async (sym) => {
+    let price = null
+    let changePct = null
+    try {
+      const res = await fetchWithTimeout(COINBASE_SPOT(sym))
+      if (res.ok) price = parseCoinbaseSpot(await res.json())
+    } catch { /* lanjut */ }
+    try {
+      const res = await fetchWithTimeout(COINBASE_STATS(sym))
+      if (res.ok) {
+        const st = parseCoinbaseStats(await res.json())
+        if (st) {
+          changePct = st.changePct
+          if (price === null) price = st.last
+        }
+      }
+    } catch { /* lanjut */ }
+    if (price === null && state?.lastPrices) {
+      const known = state.lastPrices[sym.toLowerCase()]
+      if (typeof known === 'number') return { sym, price: known, changePct, stale: true }
+    }
+    if (price === null) return null
+    return { sym, price, changePct, stale: false }
+  })
+  return (await Promise.all(jobs)).filter(Boolean)
+}
 
 const TOKEN = process.env.POLYGLANCE_BOT_TOKEN
 if (!TOKEN) {
@@ -85,22 +129,26 @@ async function handleCommand(state, chatId, parsed) {
       await sendMessage(chatId, HELP_TEXT)
       return
     case 'health': {
-      const n = state.alerts.filter((a) => a.chatId === chatId).length
-        + (state.oddsAlerts || []).filter((a) => a.chatId === chatId).length
+      const yourPrice = state.alerts.filter((a) => a.chatId === chatId).length
+      const yourOdds = (state.oddsAlerts || []).filter((a) => a.chatId === chatId).length
       await sendMessage(
         chatId,
-        `Watcher alive. Last check: ${state.lastTick || 'never'}.\n` +
-          `Your alerts: ${n}. BTC ${state.lastPrices ? fmtUsd(state.lastPrices.btc) : '?'}, ` +
-          `ETH ${state.lastPrices ? fmtUsd(state.lastPrices.eth) : '?'}.`,
+        formatHealthReply({
+          lastTick: state.lastTick,
+          lastPrices: state.lastPrices,
+          priceSource: state.priceSource,
+          yourPrice,
+          yourOdds,
+          chats: state.chats.length,
+          webhookActive: false, // fallback Node selalu polling
+        }),
       )
       return
     }
     case 'price': {
-      if (!state.lastPrices) {
-        await sendMessage(chatId, 'No price yet — try again in a minute.')
-        return
-      }
-      await sendMessage(chatId, `BTC ${fmtUsd(state.lastPrices.btc)}\nETH ${fmtUsd(state.lastPrices.eth)}`)
+      const coins = await fetchLivePrices(state)
+      const updated = new Date().toISOString().slice(11, 16) + ' UTC'
+      await sendMessage(chatId, formatPriceReply(coins, 'Coinbase', updated))
       return
     }
     case 'odds': {
@@ -109,29 +157,25 @@ async function handleCommand(state, chatId, parsed) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = await res.json()
         const arr = Array.isArray(data) ? data : data?.markets ?? []
-        const lines = formatOddsTop(arr, 3)
-        await sendMessage(chatId, lines.length ? 'Top Polymarket crypto odds:\n' + lines.join('\n') : 'No odds right now.')
+        const lines = formatOddsRich(arr, 5)
+        await sendMessage(chatId, lines.length ? 'Top 5 Polymarket crypto odds:\n\n' + lines.join('\n\n') : 'No odds right now.')
       } catch {
         await sendMessage(chatId, 'Could not fetch odds right now.')
       }
       return
     }
     case 'alert': {
-      state.alerts.push({
+      const alert = {
         chatId,
         coin: parsed.coin,
         direction: parsed.direction,
         price: parsed.price,
         fired: false,
         createdAt: now,
-      })
+      }
+      state.alerts.push(alert)
       const cur = state.lastPrices?.[parsed.coin.toLowerCase()]
-      await sendMessage(
-        chatId,
-        `Alert set: ${parsed.coin} ${parsed.direction} ${fmtUsd(parsed.price)}` +
-          (typeof cur === 'number' ? ` (now ${fmtUsd(cur)})` : '') +
-          `. I will message you when it crosses.`,
-      )
+      await sendMessage(chatId, formatAlertSetReply(alert, cur))
       return
     }
     case 'alertodds': {
@@ -145,7 +189,7 @@ async function handleCommand(state, chatId, parsed) {
           await sendMessage(chatId, `No Polymarket market matches "${parsed.keyword}". Try another keyword, e.g. /alertodds bitcoin above 60`)
           return
         }
-        ;(state.oddsAlerts || (state.oddsAlerts = [])).push({
+        const alert = {
           chatId,
           keyword: parsed.keyword,
           question: found.question,
@@ -154,56 +198,39 @@ async function handleCommand(state, chatId, parsed) {
           fired: false,
           lastYes: found.yes,
           createdAt: now,
-        })
-        const short = found.question.replace(/^Will\s+/i, '')
-        const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
-        await sendMessage(
-          chatId,
-          `Odds alert set: "${shortQ}" YES ${parsed.direction} ${parsed.pct}% (now ${found.yes}%). I will message you when it crosses.`,
-        )
+        }
+        ;(state.oddsAlerts || (state.oddsAlerts = [])).push(alert)
+        await sendMessage(chatId, formatOddsAlertSetReply(alert, found.yes))
       } catch {
         await sendMessage(chatId, 'Could not fetch odds right now. Try again in a minute.')
       }
       return
     }
     case 'list': {
-      const priceMine = state.alerts.map((a, i) => ({ a, i, kind: 'price' })).filter(({ a }) => a.chatId === chatId)
-      const oddsMine = (state.oddsAlerts || []).map((a, i) => ({ a, i, kind: 'odds' })).filter(({ a }) => a.chatId === chatId)
-      const all = [...priceMine, ...oddsMine]
-      if (all.length === 0) {
-        await sendMessage(chatId, 'No alerts yet. Use /alert btc above 58000')
-        return
-      }
-      const lines = all.map(({ a, kind }, n) => {
-        if (kind === 'price') return `${n + 1}. ${a.coin} ${a.direction} ${fmtUsd(a.price)}${a.fired ? ' (fired)' : ''}`
-        const short = a.question.replace(/^Will\s+/i, '')
-        const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
-        const now2 = typeof a.lastYes === 'number' ? ` (now ${a.lastYes}%)` : ''
-        return `${n + 1}. ODDS "${shortQ}" YES ${a.direction} ${a.threshold}%${now2}${a.fired ? ' (fired)' : ''}`
-      })
-      await sendMessage(chatId, 'Your alerts:\n' + lines.join('\n'))
+      await sendMessage(chatId, formatAlertsList(state.alerts, state.oddsAlerts, chatId, state.lastPrices, state.lastOdds))
       return
     }
     case 'remove': {
-      const priceMine = state.alerts.map((a, i) => ({ a, i, kind: 'price' })).filter(({ a }) => a.chatId === chatId)
-      const oddsMine = (state.oddsAlerts || []).map((a, i) => ({ a, i, kind: 'odds' })).filter(({ a }) => a.chatId === chatId)
-      const all = [...priceMine, ...oddsMine]
+      const all = myAlerts(state.alerts, state.oddsAlerts, chatId)
       const target = all[parsed.index - 1]
       if (!target) {
-        await sendMessage(chatId, `No alert #${parsed.index}. Use /list to see yours.`)
+        await sendMessage(
+          chatId,
+          `No alert #${parsed.index} — you only have ${all.length} alert${all.length === 1 ? '' : 's'}.\n\n` +
+            formatAlertsList(state.alerts, state.oddsAlerts, chatId, state.lastPrices, state.lastOdds),
+        )
         return
       }
+      let removed
       if (target.kind === 'price') {
-        const removed = state.alerts[target.i]
+        removed = state.alerts[target.i]
         state.alerts.splice(target.i, 1)
-        await sendMessage(chatId, `Removed: ${removed.coin} ${removed.direction} ${fmtUsd(removed.price)}`)
       } else {
-        const removed = state.oddsAlerts[target.i]
+        removed = state.oddsAlerts[target.i]
         state.oddsAlerts.splice(target.i, 1)
-        const short = removed.question.replace(/^Will\s+/i, '')
-        const shortQ = short.length > 40 ? short.slice(0, 37) + '...' : short
-        await sendMessage(chatId, `Removed odds alert: "${shortQ}" YES ${removed.direction} ${removed.threshold}%`)
       }
+      const remaining = myAlerts(state.alerts, state.oddsAlerts, chatId).length
+      await sendMessage(chatId, formatRemovedReply(removed, target.kind, remaining))
       return
     }
   }
@@ -277,9 +304,10 @@ async function tick() {
         state.offset = u.update_id + 1
         const msg = u.message
         if (msg && typeof msg.text === 'string') {
-          const parsed = parseBotCommand(msg.text)
-          if (!parsed) await sendMessage(msg.chat.id, 'Unknown command. Try /help.')
-          else await handleCommand(state, msg.chat.id, parsed)
+          // friendlyReply TIDAK PERNAH null — pesan penolakan mentah sudah tidak dipakai lagi.
+          const routed = friendlyReply(msg.text)
+          if (routed.parsed) await handleCommand(state, msg.chat.id, routed.parsed)
+          else await sendMessage(msg.chat.id, routed.usage)
         }
       }
     }
