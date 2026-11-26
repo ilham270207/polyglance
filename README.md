@@ -69,13 +69,25 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 *TICKER — live BTC + ETH prices from CoinGecko, auto-refresh every 60 seconds.*
 
-![ODDS — Polymarket crypto markets](images/frame-odds.png)
+![ODDS — Polymarket crypto markets](images/frame-odds-v5.png)
 
-*ODDS — top crypto markets on Polymarket with live YES %.*
+*ODDS — top crypto markets on Polymarket with live YES %, each with a short distinct label (v5).*
 
 ![PAPER — virtual $10,000 portfolio](images/frame-paper.png)
 
 *PAPER — virtual $10,000 portfolio, buy/sell $100 per swipe.*
+
+![VOICE — push-to-talk voice commands](images/frame-voice-v5.png)
+
+*VOICE — push-to-talk voice commands via Groq Whisper (`buy 100 bitcoin`, `set alert 58000`, `show odds`).*
+
+![ALERTS — BTC price alert + Telegram bot](images/frame-alerts-v5.png)
+
+*ALERTS — BTC price alert (target $62,000, WAITING) with the Telegram bot row (`@polyglance_alerts_bot`).*
+
+## Demo
+
+▶️ [Watch the 86-second demo on YouTube](https://www.youtube.com/watch?v=RKabw4oZtu8) — "PolyGlance — Crypto at a Glance on Even Realities G2 (Voice + Telegram)": TICKER, ODDS, paper trading, ALERTS, a live voice command, and the Telegram bot in action.
 
 ## Tech stack
 
@@ -134,7 +146,7 @@ src/voice.ts      # Voice command parser + PCM-to-WAV + mic level (unit-tested)
 src/stt.ts        # Groq Whisper STT + Worker proxy fallback (unit-tested)
 index.html        # Vite entry + companion settings page (Groq key, STT proxy URL, test chips)
 vite.config.ts    # Vite config (template)
-images/           # Simulator screenshots (TICKER / ODDS / PAPER)
+images/           # Simulator screenshots (TICKER / ODDS / PAPER / VOICE / ALERTS)
 watcher/          # Telegram bot + price watcher (Cloudflare Worker, Node fallback, tests)
 tests/            # Unit tests: voice parser (40), STT fallback (18), watcher core (30)
 polyglance.ehpk   # Packaged v5 app for the simulator / Even App
