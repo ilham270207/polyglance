@@ -87,7 +87,7 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 ## Demo
 
-▶️ [Watch the 86-second demo on YouTube](https://www.youtube.com/watch?v=RKabw4oZtu8) — "PolyGlance — Crypto at a Glance on Even Realities G2 (Voice + Telegram)": TICKER, ODDS, paper trading, ALERTS, a live voice command, and the Telegram bot in action.
+▶️ [Watch the 86-second demo on YouTube](https://www.youtube.com/watch?v=7jwChwKZxKQ) — "PolyGlance — Crypto at a Glance on Even Realities G2 (Voice + Telegram)": TICKER, ODDS, paper trading, ALERTS, a live voice command, and the Telegram bot in action.
 
 ## Tech stack
 
