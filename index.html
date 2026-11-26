@@ -30,6 +30,113 @@
   </head>
   <body>
     <div id="app">Companion app is running. Check the glasses display.</div>
+    <div id="settings">
+      <h2>PolyGlance settings</h2>
+      <p class="hint">Voice commands use Groq Whisper. Your key stays on this phone only (localStorage) &mdash; it is never sent anywhere except api.groq.com for transcription (or your own Worker proxy below, if set).</p>
+      <label for="groq-key">Groq API key</label>
+      <input id="groq-key" type="password" placeholder="gsk_..." autocomplete="off" />
+      <div class="row">
+        <button id="groq-save">Save key</button>
+        <button id="groq-clear">Clear key</button>
+      </div>
+      <p id="groq-status" class="status">Groq key: not set</p>
+      <label for="stt-proxy">STT proxy URL (optional)</label>
+      <input id="stt-proxy" type="url" placeholder="https://polyglance-watcher.xxx.workers.dev/stt" autocomplete="off" />
+      <div class="row">
+        <button id="stt-proxy-save">Save proxy</button>
+        <button id="stt-proxy-clear">Clear proxy</button>
+      </div>
+      <p id="stt-proxy-status" class="status">STT proxy: not set</p>
+      <p class="hint">Only used when the direct Groq call fails or times out (Cloudflare sometimes blocks the glasses WebView). The proxy is your own Cloudflare Worker &mdash; it forwards audio to Groq with its own key, so the glasses never need a direct connection to Groq. Leave empty to disable.</p>
+      <h2>Test voice command</h2>
+      <p class="hint">Runs the same parser as the glasses mic &mdash; no key needed. Try it without speaking.</p>
+      <input id="voice-test" type="text" placeholder="buy 100 bitcoin" autocomplete="off" />
+      <div class="row">
+        <button id="voice-run">Run command</button>
+      </div>
+      <div class="row chips">
+        <button data-cmd="buy 100 bitcoin">buy 100 bitcoin</button>
+        <button data-cmd="sell 100 ethereum">sell 100 ethereum</button>
+        <button data-cmd="set alert to fifty eight thousand">set alert 58000</button>
+        <button data-cmd="show odds">show odds</button>
+        <button data-cmd="show ticker">show ticker</button>
+      </div>
+      <p id="voice-status" class="status"></p>
+      <h2>Telegram alerts</h2>
+      <p class="hint">Price alerts by Telegram bot: <b>@polyglance_alerts_bot</b> &mdash; open it in Telegram and send /start, then /alert btc above 58000. The bot runs on a Cloudflare Worker (deploy separately).</p>
+      <p class="foot">PolyGlance v5 &mdash; Ticker / Odds / Paper BTC / Paper ETH / Alerts / Voice</p>
+    </div>
+    <style>
+      #settings { max-width: 560px; margin: 0 auto; padding: 0 24px 48px; text-align: left; }
+      #settings h2 { font-size: 16px; margin: 28px 0 8px; color: #7CFC66; }
+      #settings .hint { color: #BFBFBF; margin: 0 0 12px; }
+      #settings label { display: block; margin-bottom: 6px; }
+      #settings input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #555; border-radius: 8px; background: #1a1a1a; color: #E5E5E5; font: inherit; margin-bottom: 10px; }
+      #settings .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+      #settings button { padding: 10px 14px; border: 1px solid #7CFC66; border-radius: 8px; background: transparent; color: #7CFC66; font: inherit; cursor: pointer; }
+      #settings button:active { background: #7CFC66; color: #111; }
+      #settings .status { color: #BFBFBF; margin: 4px 0 0; min-height: 1.4em; }
+      #settings .foot { color: #888; margin-top: 28px; }
+    </style>
+    <script>
+      (function () {
+        var KEY = 'polyglance.groq-key.v1';
+        var keyInput = document.getElementById('groq-key');
+        var statusEl = document.getElementById('groq-status');
+        var voiceInput = document.getElementById('voice-test');
+        var voiceStatus = document.getElementById('voice-status');
+        function refreshStatus() {
+          try {
+            var k = localStorage.getItem(KEY);
+            statusEl.textContent = k ? 'Groq key: saved (' + k.length + ' chars)' : 'Groq key: not set';
+          } catch (e) { statusEl.textContent = 'Groq key: storage unavailable'; }
+        }
+        document.getElementById('groq-save').addEventListener('click', function () {
+          var v = (keyInput.value || '').trim();
+          if (!v) { statusEl.textContent = 'Paste your key first.'; return; }
+          try { localStorage.setItem(KEY, v); keyInput.value = ''; statusEl.textContent = 'Groq key saved on this phone.'; }
+          catch (e) { statusEl.textContent = 'Could not save key.'; }
+          refreshStatus();
+        });
+        document.getElementById('groq-clear').addEventListener('click', function () {
+          try { localStorage.removeItem(KEY); } catch (e) {}
+          refreshStatus();
+        });
+        var PROXY_KEY = 'polyglance.stt-proxy.v1';
+        var proxyInput = document.getElementById('stt-proxy');
+        var proxyStatus = document.getElementById('stt-proxy-status');
+        function refreshProxyStatus() {
+          try {
+            var p = localStorage.getItem(PROXY_KEY);
+            proxyStatus.textContent = p ? 'STT proxy: set (' + p + ')' : 'STT proxy: not set (direct only)';
+          } catch (e) { proxyStatus.textContent = 'STT proxy: storage unavailable'; }
+        }
+        document.getElementById('stt-proxy-save').addEventListener('click', function () {
+          var v = (proxyInput.value || '').trim();
+          if (!v) { proxyStatus.textContent = 'Paste your Worker /stt URL first.'; return; }
+          try { localStorage.setItem(PROXY_KEY, v); proxyInput.value = ''; proxyStatus.textContent = 'STT proxy saved.'; }
+          catch (e) { proxyStatus.textContent = 'Could not save proxy.'; }
+          refreshProxyStatus();
+        });
+        document.getElementById('stt-proxy-clear').addEventListener('click', function () {
+          try { localStorage.removeItem(PROXY_KEY); } catch (e) {}
+          refreshProxyStatus();
+        });
+        function runCmd(text) {
+          if (!text) return;
+          window.dispatchEvent(new CustomEvent('polyglance-voice-cmd', { detail: { text: text } }));
+          voiceStatus.textContent = 'Sent to glasses: "' + text + '"';
+        }
+        document.getElementById('voice-run').addEventListener('click', function () { runCmd((voiceInput.value || '').trim()); });
+        voiceInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') runCmd((voiceInput.value || '').trim()); });
+        var chips = document.querySelectorAll('#settings [data-cmd]');
+        for (var i = 0; i < chips.length; i++) {
+          chips[i].addEventListener('click', function () { runCmd(this.getAttribute('data-cmd')); });
+        }
+        refreshStatus();
+        refreshProxyStatus();
+      })();
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

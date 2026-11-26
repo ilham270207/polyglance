@@ -2,8 +2,10 @@
 
 A smart-glasses app for the Even Realities G2 that lets crypto holders check
 prices, prediction-market odds, a virtual portfolio, and price alerts at a
-glance — built for the **Heads Up: Even Realities Hackathon** (track:
-**Crypto & DeFi**), solo by [@ilham270207](https://github.com/ilham270207).
+glance — with **voice commands** and **Telegram alerts** that keep working
+when the glasses app is closed — built for the **Heads Up: Even Realities
+Hackathon** (track: **Crypto & DeFi**), solo by
+[@ilham270207](https://github.com/ilham270207).
 
 > **Data only — not financial advice. Virtual money, no real funds.**
 
@@ -18,7 +20,8 @@ One page, one full-screen text container (576×288, green monochrome).
 | **ODDS** | Top 3 crypto markets on Polymarket (YES % by 24h volume), each shown as a short distinct label like `BTC dip $55,000? YES 38%` | Previous / next page of markets |
 | **PAPER-BTC** | Virtual $10,000 portfolio: cash, BTC holding, total, P/L | Buy $100 BTC / sell $100 BTC |
 | **PAPER-ETH** | Same shared cash, ETH holding, total, P/L | Buy $100 ETH / sell $100 ETH |
-| **ALERTS** | BTC price alert: target + status (WAITING / `BTC HIT $X!`) | Target +$1,000 / -$1,000 |
+| **ALERTS** | BTC price alert: target + status (WAITING / `BTC HIT $X!`); Telegram bot row `@polyglance_alerts_bot` | Target +$1,000 / -$1,000 |
+| **VOICE** | Push-to-talk voice commands via Groq Whisper (e.g. `buy 100 bitcoin`, `set alert 58000`, `show odds`); live mic level meter | Start/stop listening / cancel |
 
 - Paper trades are stored in `localStorage` (`polyglance.paper.v2`, migrated
   from v1 `{cash, btc}` with ETH starting at 0), so the portfolio survives
@@ -33,6 +36,30 @@ One page, one full-screen text container (576×288, green monochrome).
 - If a fetch fails, the app keeps showing the last data with an
   `OFFLINE - last data` line instead of going blank.
 - All on-glasses text is plain ASCII (max 8 lines, 34 chars per line).
+
+## Voice + Telegram (v5)
+
+- **Voice commands (VOICE view):** push-to-talk on the glasses mic
+  (`g2-microphone` permission). Audio is transcribed with Groq Whisper
+  (`whisper-large-v3-turbo`) and run through a local command parser
+  (`src/voice.ts`, 40/40 unit tests) — the same parser the settings-page
+  command chips use, so commands are testable without speaking. Without a
+  Groq key the view explains how to set one.
+- **Your key stays on your phone:** the Groq API key is entered in the
+  companion settings page and stored in `localStorage` only — it is never
+  sent anywhere except `api.groq.com` for transcription. If the direct
+  Groq call fails or times out, the app falls back to your own Cloudflare
+  Worker STT proxy (`POST /stt`, URL also set in settings); the proxy holds
+  its own key as a Worker secret, so the glasses never need a direct
+  connection to Groq.
+- **Telegram alerts:** a Cloudflare Worker watcher (`watcher/`, cron every
+  minute) polls prices and runs the bot **@polyglance_alerts_bot**:
+  `/alert btc above 58000`, `/price`, `/odds`, `/list`, `/remove 1`,
+  `/health`, `/help`. Alerts fire once per crossing and keep working even
+  when the glasses app is closed. The bot token is a Worker secret only —
+  never in this repo. Price source is CoinGecko with a Coinbase spot
+  fallback (CoinGecko returns 403 to Workers); see
+  `watcher/README.md` for deploy steps.
 
 ## Screenshots
 
@@ -55,9 +82,12 @@ Glasses display (576×288), captured in the Even Hub simulator.
 - **Vite + TypeScript** (template `even-realities/evenhub-templates/minimal`)
 - **Even Hub SDK** `@evenrealities/even_hub_sdk` 0.0.10
 - **Node.js** 20 LTS or newer (developed on Node v24 in Termux)
-- **No backend, no API keys.** Data comes straight from public APIs:
+- **Core app: no backend, no API keys.** Data comes straight from public APIs:
   - [CoinGecko](https://api.coingecko.com/api/v3/simple/price) — BTC/ETH prices
   - [Polymarket Gamma API](https://gamma-api.polymarket.com/markets) — market odds
+- **Voice (optional):** your own Groq API key, stored on-phone only (see
+  above). **Telegram alerts (optional):** Cloudflare Worker in `watcher/`
+  (free tier, cron every minute; secrets via `wrangler secret put`).
 - The app runs as a web app in the phone's WebView; the G2 glasses are only
   the display + input (no code runs on the glasses).
 
@@ -92,18 +122,22 @@ Notes:
 
 ## Install (.ehpk)
 
-`polyglance.ehpk` (in this repo) is the packaged v4 app — load it in the
+`polyglance.ehpk` (in this repo) is the packaged v5 app — load it in the
 Even Hub simulator or the Even App to try it without building.
 
 ## Project structure
 
 ```
-app.json          # Even Hub manifest (package id, SDK version, network whitelist)
-src/main.ts       # Whole app: bridge setup, 5 views, paper trade BTC+ETH, price alert
-index.html        # Vite entry (template)
+app.json          # Even Hub manifest (package id, SDK version, network whitelist, g2-microphone)
+src/main.ts       # Whole app: bridge setup, 6 views, paper trade BTC+ETH, price alert, voice
+src/voice.ts      # Voice command parser + PCM-to-WAV + mic level (unit-tested)
+src/stt.ts        # Groq Whisper STT + Worker proxy fallback (unit-tested)
+index.html        # Vite entry + companion settings page (Groq key, STT proxy URL, test chips)
 vite.config.ts    # Vite config (template)
 images/           # Simulator screenshots (TICKER / ODDS / PAPER)
-polyglance.ehpk   # Packaged v4 app for the simulator / Even App
+watcher/          # Telegram bot + price watcher (Cloudflare Worker, Node fallback, tests)
+tests/            # Unit tests: voice parser (40), STT fallback (18), watcher core (30)
+polyglance.ehpk   # Packaged v5 app for the simulator / Even App
 ```
 
 ## Submission
