@@ -4,6 +4,7 @@
 // Perintah dalam bahasa Inggris, pendek (Whisper paling akurat di sini).
 
 export type Coin = 'BTC' | 'ETH'
+export type AlertCoin = 'BTC' | 'ETH' | 'SOL'
 export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'voice'
 
 export type VoiceAction =
@@ -12,7 +13,9 @@ export type VoiceAction =
   | { type: 'back' }
   | { type: 'buy'; coin: Coin }
   | { type: 'sell'; coin: Coin }
-  | { type: 'set-alert'; target: number }
+  | { type: 'sell-all'; coin: Coin | 'ALL' }
+  | { type: 'set-alert'; target: number; coin?: AlertCoin }
+  | { type: 'cancel-alert' }
   | { type: 'refresh' }
   | { type: 'stop' }
 
@@ -69,6 +72,13 @@ function detectCoin(tokens: string[]): Coin | null {
   return null
 }
 
+function detectAlertCoin(tokens: string[]): AlertCoin | null {
+  if (tokens.includes('bitcoin') || tokens.includes('btc')) return 'BTC'
+  if (tokens.includes('ethereum') || tokens.includes('eth')) return 'ETH'
+  if (tokens.includes('solana') || tokens.includes('sol')) return 'SOL'
+  return null
+}
+
 function normalize(text: string): string[] {
   return text
     .toLowerCase()
@@ -84,12 +94,23 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
   if (tokens.length === 0) return null
   const has = (...words: string[]): boolean => words.some((w) => tokens.includes(w))
 
+  // Hapus alert AKTIF — dicek DULU sebelum 'stop' generik, karena
+  // "cancel alert" mengandung kata 'cancel'.
+  // "cancel alert" / "remove alert" / "delete alert" / "clear alert"
+  if (has('alert', 'alerts') && has('cancel', 'remove', 'delete', 'clear')) {
+    return { type: 'cancel-alert' }
+  }
+
   if (has('stop', 'cancel', 'nevermind', 'never', 'mind')) return { type: 'stop' }
   if (has('next')) return { type: 'next' }
   if (has('back', 'previous')) return { type: 'back' }
   if (has('refresh', 'update', 'reload')) return { type: 'refresh' }
 
-  // Set alert: "set alert to fifty eight thousand" / "alert 58000" / "alert fifty eight thousand"
+  // Set alert: "set alert to fifty eight thousand" / "alert 58000" /
+  // "set alert eth 1800" / "alert sol 150". Tanpa nama koin = aset aktif
+  // di view ALERTS. Lantai parser 10 (bukan 1000): validasi per-aset
+  // (BTC >=1000, ETH >=100, SOL >=10) dilakukan di main.ts, karena angka
+  // yang kecil untuk BTC bisa jadi valid untuk SOL.
   if (has('alert', 'alerts')) {
     const target = extractNumber(tokens)
     if (target === null) {
@@ -97,9 +118,9 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
       if (tokens.includes('alerts')) return { type: 'goto', view: 'alerts' }
       return null
     }
-    // Target di bawah $1.000 tidak masuk akal untuk BTC — tolak, jangan nebak.
-    if (target < 1000) return null
-    return { type: 'set-alert', target }
+    if (target < 10) return null
+    const coin = detectAlertCoin(tokens)
+    return coin ? { type: 'set-alert', target, coin } : { type: 'set-alert', target }
   }
 
   // Buy / sell $100 (jumlah selalu 100 — "one hundred" boleh disebut atau tidak)
@@ -109,6 +130,13 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
     return null
   }
   if (has('sell')) {
+    // Jual semua: "sell all bitcoin" = semua BTC, "sell all" = semua BTC+ETH.
+    // SOL tidak punya paper holding — "sell all solana" ditolak, jangan nebak.
+    if (has('all')) {
+      if (has('solana', 'sol')) return null
+      const coin = detectCoin(tokens)
+      return { type: 'sell-all', coin: coin ?? 'ALL' }
+    }
     const coin = detectCoin(tokens)
     if (coin) return { type: 'sell', coin }
     return null

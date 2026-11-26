@@ -3,23 +3,14 @@
 // (meng-compile src/voice.ts dulu dengan tsc ke /tmp, lalu import hasil compile.)
 
 import { execSync } from 'node:child_process'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = new URL('..', import.meta.url).pathname
-const HOME = process.env.HOME || ''
-// tsc: utamakan typescript repo ini (sesudah npm install), lalu build dir
-// lokal, terakhir npx (npx menolak jalan tanpa install lokal).
-const TSC_CANDIDATES = [
-  join(ROOT, 'node_modules', '.bin', 'tsc'),
-  join(HOME, 'polyglance-check', 'node_modules', '.bin', 'tsc'),
-  'npx tsc',
-]
-const TSC = TSC_CANDIDATES.find((c) => c === 'npx tsc' || existsSync(c))
 const outDir = mkdtempSync(join(tmpdir(), 'pg-voice-test-'))
-execSync(`${TSC} src/voice.ts --outDir ${outDir} --module nodenext --target es2020 --moduleResolution nodenext --skipLibCheck`, {
+execSync(`npx tsc src/voice.ts --outDir ${outDir} --module nodenext --target es2020 --moduleResolution nodenext --skipLibCheck`, {
   cwd: ROOT,
   stdio: 'pipe',
 })
@@ -68,8 +59,30 @@ eq(parseVoiceCommand('buy'), null, 'buy tanpa coin -> null (jangan nebak)')
 eq(parseVoiceCommand('set alert to fifty eight thousand'), { type: 'set-alert', target: 58000 }, 'alert kata')
 eq(parseVoiceCommand('alert 58000'), { type: 'set-alert', target: 58000 }, 'alert digit')
 eq(parseVoiceCommand('set alert fifty eight thousand'), { type: 'set-alert', target: 58000 }, 'alert tanpa to')
-eq(parseVoiceCommand('alert 100'), null, 'alert 100 terlalu kecil -> null')
+eq(parseVoiceCommand('set alert eth 1800'), { type: 'set-alert', target: 1800, coin: 'ETH' }, 'alert eth berkoin')
+eq(parseVoiceCommand('alert sol 150'), { type: 'set-alert', target: 150, coin: 'SOL' }, 'alert sol berkoin')
+eq(parseVoiceCommand('set alert bitcoin 60000'), { type: 'set-alert', target: 60000, coin: 'BTC' }, 'alert btc berkoin')
+eq(parseVoiceCommand('alert 100'), { type: 'set-alert', target: 100 }, 'alert 100 diterima parser (validasi per-aset di main.ts)')
+eq(parseVoiceCommand('alert 5'), null, 'alert 5 di bawah lantai parser 10 -> null')
 eq(parseVoiceCommand('set alert'), null, 'alert tanpa angka -> null')
+
+// --- jual semua (v6) ---
+eq(parseVoiceCommand('sell all bitcoin'), { type: 'sell-all', coin: 'BTC' }, 'sell all btc')
+eq(parseVoiceCommand('sell all ethereum'), { type: 'sell-all', coin: 'ETH' }, 'sell all eth')
+eq(parseVoiceCommand('sell all'), { type: 'sell-all', coin: 'ALL' }, 'sell all = btc+eth')
+eq(parseVoiceCommand('sell all solana'), null, 'sell all sol -> null (tanpa paper holding)')
+eq(parseVoiceCommand('sell everything'), null, 'sell everything tanpa all/coin -> null')
+
+// --- hapus alert (v6) ---
+eq(parseVoiceCommand('cancel alert'), { type: 'cancel-alert' }, 'cancel alert')
+eq(parseVoiceCommand('remove alert'), { type: 'cancel-alert' }, 'remove alert')
+eq(parseVoiceCommand('delete alert'), { type: 'cancel-alert' }, 'delete alert')
+eq(parseVoiceCommand('clear alert'), { type: 'cancel-alert' }, 'clear alert')
+eq(parseVoiceCommand('cancel'), { type: 'stop' }, 'cancel saja tetap stop')
+
+// --- portfolio (v6, eksplisit) ---
+eq(parseVoiceCommand('show portfolio'), { type: 'goto', view: 'paper-btc' }, 'show portfolio')
+eq(parseVoiceCommand('check portfolio'), { type: 'goto', view: 'paper-btc' }, 'check portfolio')
 
 // --- stop & tidak dikenal ---
 eq(parseVoiceCommand('stop'), { type: 'stop' }, 'stop')

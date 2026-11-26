@@ -1,6 +1,9 @@
-// PolyGlance v5 - 6 view + paper trade BTC/ETH + price alert + VOICE + Telegram
+// PolyGlance v6 - 6 view + paper trade BTC/ETH + price alert + VOICE + Telegram
+// v6: ALERTS multi-aset (BTC/ETH/SOL, ganti aset = double-tap di view ALERTS),
+// TICKER 5 koin (BTC/ETH/SOL/DOGE/XRP), perintah suara baru (sell all,
+// show/check portfolio, cancel/remove alert).
 // Tap = pindah view (TICKER -> ODDS -> PAPER-BTC -> PAPER-ETH -> ALERTS -> VOICE -> TICKER).
-// Double-tap = keluar. Swipe up/down = aksi per view.
+// Double-tap = keluar (kecuali di view ALERTS: ganti aset). Swipe up/down = aksi per view.
 // View VOICE: push-to-talk. Swipe up = mulai dengar, swipe up lagi = stop & kirim
 // ke Groq Whisper (key dari localStorage, diisi lewat halaman settings di HP).
 // Semua teks ASCII saja. Satu container 576x288, isEventCapture: 1.
@@ -12,7 +15,7 @@ import {
   TextContainerUpgrade,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
-import { parseVoiceCommand, rmsLevel, type VoiceAction } from './voice'
+import { parseVoiceCommand, rmsLevel, type VoiceAction, type AlertCoin } from './voice'
 import { transcribePcm, getGroqKey, GROQ_KEY_STORAGE } from './stt'
 
 const bridge = await waitForEvenAppBridge()
@@ -20,6 +23,13 @@ const bridge = await waitForEvenAppBridge()
 // ---------- helpers format ----------
 function fmtUsd(n: number): string {
   return '$' + Math.round(n).toLocaleString('en-US')
+}
+
+/** Harga per koin: BTC/ETH dolar bulat, SOL/XRP 2 desimal, DOGE 4 desimal. */
+function fmtCoinPrice(sym: string, n: number): string {
+  if (sym === 'DOGE') return '$' + n.toFixed(4)
+  if (sym === 'SOL' || sym === 'XRP') return '$' + n.toFixed(2)
+  return fmtUsd(n)
 }
 
 function fmtChg(n: number): string {
@@ -38,8 +48,17 @@ function truncate(s: string, max: number): string {
 type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'voice'
 let view: View = 'ticker'
 
-interface Prices { btc: number; eth: number; btcChg: number; ethChg: number }
+interface Prices {
+  btc: number; eth: number; sol: number; doge: number; xrp: number
+  btcChg: number; ethChg: number; solChg: number; dogeChg: number; xrpChg: number
+}
 let prices: Prices | null = null
+
+/** Harga aset alert (BTC/ETH/SOL) dari state prices — 0 kalau belum ada data. */
+function priceOf(coin: AlertCoin): number {
+  if (!prices) return 0
+  return coin === 'BTC' ? prices.btc : coin === 'ETH' ? prices.eth : prices.sol
+}
 let lastUpdated = ''
 let offline = false
 
@@ -85,40 +104,107 @@ function savePaper(): void {
   }
 }
 
-// ---------- price alert (BTC) ----------
-// Alert "naik ke target": menyala saat harga BTC mencapai/melewati target.
-// Target default selalu DI ATAS harga saat ini (ribuan berikutnya) supaya
+// ---------- price alert (BTC/ETH/SOL, v6) ----------
+// Alert "naik ke target": menyala saat harga aset mencapai/melewati target.
+// Target default selalu DI ATAS harga saat ini (step berikutnya) supaya
 // tidak langsung trigger saat pertama kali diset.
-const ALERT_KEY = 'polyglance.alert.v1'
-interface AlertState { target: number; armed: boolean; triggered: boolean }
+// Step geser target per aset: BTC $1.000, ETH $100, SOL $10.
+// v2 menyimpan alert per aset + aset aktif; data v1 (BTC saja) dimigrasi
+// mulus ke alerts.BTC supaya target lama pengguna tidak hilang.
+const ALERT_KEY_V2 = 'polyglance.alert.v2'
+const ALERT_KEY_V1 = 'polyglance.alert.v1'
+interface SingleAlert { target: number; armed: boolean; triggered: boolean }
+interface AlertStateV2 {
+  active: AlertCoin
+  alerts: Record<AlertCoin, SingleAlert>
+  /** true setelah target default pertama kali dibuat. Kalau false, fetch
+    harga pertama akan mengisi target default + meng-arm semua aset.
+    Mencegah alert yang sengaja di-cancel diam-diam hidup lagi. */
+  seeded: boolean
+}
 
-function loadAlert(): AlertState {
+const ALERT_STEP: Record<AlertCoin, number> = { BTC: 1000, ETH: 100, SOL: 10 }
+const ALERT_MIN: Record<AlertCoin, number> = { BTC: 1000, ETH: 100, SOL: 10 }
+
+function blankAlert(): SingleAlert {
+  return { target: 0, armed: false, triggered: false }
+}
+
+function loadAlert(): AlertStateV2 {
   try {
-    const raw = localStorage.getItem(ALERT_KEY)
-    if (raw) {
-      const a = JSON.parse(raw) as Partial<AlertState>
+    const raw2 = localStorage.getItem(ALERT_KEY_V2)
+    if (raw2) {
+      const a = JSON.parse(raw2) as Partial<AlertStateV2>
+      if (a.alerts && typeof a.alerts === 'object') {
+        const read = (c: AlertCoin): SingleAlert => {
+          const s = (a.alerts as Record<string, Partial<SingleAlert> | undefined>)[c]
+          return (s && typeof s.target === 'number')
+            ? { target: s.target, armed: s.armed === true, triggered: s.triggered === true }
+            : blankAlert()
+        }
+        const active: AlertCoin = a.active === 'ETH' || a.active === 'SOL' ? a.active : 'BTC'
+        // State v2 tanpa field seeded (dibuat v6 awal) dianggap sudah seeded —
+        // kalau tidak, alert yang baru di-cancel akan dibuat ulang.
+        return {
+          active,
+          alerts: { BTC: read('BTC'), ETH: read('ETH'), SOL: read('SOL') },
+          seeded: a.seeded !== false,
+        }
+      }
+    }
+    // Migrasi mulus dari v1 {target, armed, triggered} (BTC saja).
+    const raw1 = localStorage.getItem(ALERT_KEY_V1)
+    if (raw1) {
+      const a = JSON.parse(raw1) as Partial<SingleAlert>
       if (typeof a.target === 'number') {
         return {
-          target: a.target,
-          armed: a.armed === true,
-          triggered: a.triggered === true,
+          active: 'BTC',
+          alerts: {
+            BTC: { target: a.target, armed: a.armed === true, triggered: a.triggered === true },
+            ETH: blankAlert(),
+            SOL: blankAlert(),
+          },
+          seeded: true,
         }
       }
     }
   } catch {
     // abaikan - mulai tanpa target
   }
-  return { target: 0, armed: false, triggered: false }
+  return {
+    active: 'BTC',
+    alerts: { BTC: blankAlert(), ETH: blankAlert(), SOL: blankAlert() },
+    seeded: false,
+  }
 }
 
-let alertState: AlertState = loadAlert()
+let alertState: AlertStateV2 = loadAlert()
 
 function saveAlert(): void {
   try {
-    localStorage.setItem(ALERT_KEY, JSON.stringify(alertState))
+    localStorage.setItem(ALERT_KEY_V2, JSON.stringify(alertState))
   } catch {
     // abaikan
   }
+}
+
+function activeAlert(): SingleAlert {
+  return alertState.alerts[alertState.active]
+}
+
+/** Target default aset: step berikutnya di atas harga saat ini. */
+function defaultTarget(coin: AlertCoin, price: number): number {
+  const step = ALERT_STEP[coin]
+  return (Math.floor(price / step) + 1) * step
+}
+
+const ALERT_ORDER: AlertCoin[] = ['BTC', 'ETH', 'SOL']
+
+function cycleAlertAsset(): void {
+  const idx = ALERT_ORDER.indexOf(alertState.active)
+  alertState.active = ALERT_ORDER[(idx + 1) % ALERT_ORDER.length]
+  saveAlert()
+  render()
 }
 
 let transientMsg = ''
@@ -294,8 +380,12 @@ function executeVoiceAction(action: VoiceAction): string {
       return buyCoin(action.coin)
     case 'sell':
       return sellCoin(action.coin)
+    case 'sell-all':
+      return sellAllCoin(action.coin)
     case 'set-alert':
-      return setAlertTarget(action.target)
+      return setAlertTarget(action.target, action.coin)
+    case 'cancel-alert':
+      return cancelActiveAlert()
   }
 }
 
@@ -404,9 +494,9 @@ function voiceLines(): string[] {
   }
   return [
     'VOICE - push to talk',
-    'say: buy 100 bitcoin',
-    'say: set alert 58000',
-    'say: show odds',
+    'say: sell all bitcoin',
+    'say: show portfolio',
+    'say: cancel alert',
     'up: start listening',
     'dn: back to alerts',
     'tap: ticker >',
@@ -422,8 +512,11 @@ function buildContent(): string {
     if (!prices) return 'POLYGLANCE\nloading prices...\ntap: odds >'
     return [
       'POLYGLANCE',
-      `BTC ${fmtUsd(prices.btc)}  ${fmtChg(prices.btcChg)}`,
-      `ETH ${fmtUsd(prices.eth)}  ${fmtChg(prices.ethChg)}`,
+      `BTC ${fmtCoinPrice('BTC', prices.btc)}  ${fmtChg(prices.btcChg)}`,
+      `ETH ${fmtCoinPrice('ETH', prices.eth)}  ${fmtChg(prices.ethChg)}`,
+      `SOL ${fmtCoinPrice('SOL', prices.sol)}  ${fmtChg(prices.solChg)}`,
+      `DOGE ${fmtCoinPrice('DOGE', prices.doge)}  ${fmtChg(prices.dogeChg)}`,
+      `XRP ${fmtCoinPrice('XRP', prices.xrp)}  ${fmtChg(prices.xrpChg)}`,
       offline ? 'OFFLINE - last data' : `updated ${lastUpdated}`,
       'tap: odds >',
     ].join('\n')
@@ -445,20 +538,24 @@ function buildContent(): string {
   if (view === 'paper-eth') return paperLines('ETH').join('\n')
 
   if (view === 'alerts') {
-    const targetLine = alertState.target > 0
-      ? `target ${fmtUsd(alertState.target)}`
+    const coin = alertState.active
+    const a = activeAlert()
+    const price = prices ? priceOf(coin) : 0
+    const targetLine = a.target > 0
+      ? `target ${fmtCoinPrice(coin, a.target)}`
       : 'target: not set'
-    const statusLine = alertState.triggered
-      ? `BTC HIT ${fmtUsd(alertState.target)}!`
-      : alertState.armed
+    const statusLine = a.triggered
+      ? `${coin} HIT ${fmtCoinPrice(coin, a.target)}!`
+      : a.armed
         ? 'status: WAITING'
         : 'status: OFF'
     return [
-      'ALERTS - BTC price',
+      `ALERTS - ${coin}`,
       targetLine,
       statusLine,
-      prices ? `now ${fmtUsd(prices.btc)}` : 'now: loading...',
-      'up: +$1,000  dn: -$1,000',
+      prices ? `now ${fmtCoinPrice(coin, price)}` : 'now: loading...',
+      `up: +${fmtCoinPrice(coin, ALERT_STEP[coin])}  dn: -${fmtCoinPrice(coin, ALERT_STEP[coin])}`,
+      'dbl-tap: next coin',
       'TG: @polyglance_alerts_bot',
       'tap: voice >',
     ].join('\n')
@@ -482,30 +579,47 @@ function render(): void {
 async function fetchPrices(): Promise<void> {
   try {
     const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true',
+      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,dogecoin,ripple&vs_currencies=usd&include_24hr_change=true',
     )
     console.log('coingecko status:', res.status)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     const btc = data?.bitcoin
     const eth = data?.ethereum
-    if (!btc || !eth) throw new Error('bad payload')
+    const sol = data?.solana
+    const doge = data?.dogecoin
+    const xrp = data?.ripple
+    if (!btc || !eth || !sol || !doge || !xrp) throw new Error('bad payload')
     prices = {
       btc: Number(btc.usd),
       eth: Number(eth.usd),
+      sol: Number(sol.usd),
+      doge: Number(doge.usd),
+      xrp: Number(xrp.usd),
       btcChg: Number(btc.usd_24h_change),
       ethChg: Number(eth.usd_24h_change),
+      solChg: Number(sol.usd_24h_change),
+      dogeChg: Number(doge.usd_24h_change),
+      xrpChg: Number(xrp.usd_24h_change),
     }
     console.log('coingecko data:', data)
     lastUpdated = fmtTime(new Date())
     offline = false
-    // Target default: ribuan berikutnya di atas harga saat ini.
-    if (alertState.target === 0) {
-      alertState.target = (Math.floor(prices.btc / 1000) + 1) * 1000
-      alertState.armed = true
-      alertState.triggered = false
-      saveAlert()
+    // Target default: step berikutnya di atas harga saat ini, per aset.
+    // Hanya sekali (seeded=false, instalasi baru) — alert yang sengaja
+    // di-cancel (target 0) TIDAK dibuat ulang diam-diam.
+    if (!alertState.seeded) {
+      for (const coin of ALERT_ORDER) {
+        const a = alertState.alerts[coin]
+        if (a.target === 0) {
+          a.target = defaultTarget(coin, priceOf(coin))
+          a.armed = true
+          a.triggered = false
+        }
+      }
+      alertState.seeded = true
     }
+    saveAlert()
   } catch (err) {
     console.log('coingecko fetch failed:', err)
     offline = true
@@ -569,19 +683,28 @@ async function fetchOdds(): Promise<void> {
   }
 }
 
-// Alert menyala saat harga BTC mencapai/melewati target.
-// (Target yang diset di bawah harga saat ini langsung trigger -
+// Alert menyala saat harga aset mencapai/melewati targetnya.
+// Dicek semua aset yang di-arm; yang pertama kena (urutan BTC, ETH, SOL)
+// jadi aset aktif dan view lompat ke ALERTS.
+// (Target yang diset di bawah harga saat ini langsung trigger —
 //  harga sudah melewatinya.)
 function checkAlert(): void {
-  if (!prices || !alertState.armed || alertState.triggered || alertState.target === 0) return
-  if (prices.btc >= alertState.target) {
-    alertState.triggered = true
-    saveAlert()
-    // Auto-pindah ke view ALERTS sekali saat trigger.
-    if (view !== 'alerts') {
-      view = 'alerts'
+  if (!prices) return
+  for (const coin of ALERT_ORDER) {
+    const a = alertState.alerts[coin]
+    if (!a.armed || a.triggered || a.target === 0) continue
+    if (priceOf(coin) >= a.target) {
+      a.triggered = true
+      saveAlert()
+      alertState.active = coin
+      saveAlert()
+      // Auto-pindah ke view ALERTS sekali saat trigger.
+      if (view !== 'alerts') {
+        view = 'alerts'
+      }
+      render()
+      return
     }
-    render()
   }
 }
 
@@ -683,34 +806,78 @@ function sellCoin(sym: 'BTC' | 'ETH'): string {
   return `SOLD $100 ${sym}`
 }
 
-function setAlertTarget(target: number): string {
+function setAlertTarget(target: number, coin?: AlertCoin): string {
   if (!prices) return 'NO PRICE YET'
-  alertState.target = Math.max(1000, Math.round(target))
-  alertState.armed = true
-  alertState.triggered = false
+  const c: AlertCoin = coin ?? alertState.active
+  if (target < ALERT_MIN[c]) return `TARGET TOO LOW (min ${fmtCoinPrice(c, ALERT_MIN[c])})`
+  const a = alertState.alerts[c]
+  a.target = Math.round(target)
+  a.armed = true
+  a.triggered = false
+  alertState.active = c
   saveAlert()
   // Cek trigger tanpa auto-pindah view (hasil suara harus tampil dulu).
-  if (prices.btc >= alertState.target) {
-    alertState.triggered = true
+  if (priceOf(c) >= a.target) {
+    a.triggered = true
     saveAlert()
     render()
-    return `ALERT ${fmtUsd(alertState.target)} HIT!`
+    return `ALERT ${c} ${fmtCoinPrice(c, a.target)} HIT!`
   }
   render()
-  return `ALERT SET ${fmtUsd(alertState.target)}`
+  return `ALERT SET ${c} ${fmtCoinPrice(c, a.target)}`
 }
 
-function adjustAlert(delta: number): void {
+function adjustAlert(steps: number): void {
   if (!prices) { showTransient('NO PRICE YET'); return }
-  if (alertState.target === 0) {
-    alertState.target = (Math.floor(prices.btc / 1000) + 1) * 1000
+  const coin = alertState.active
+  const a = activeAlert()
+  const step = ALERT_STEP[coin]
+  if (a.target === 0) {
+    a.target = defaultTarget(coin, priceOf(coin))
   }
-  alertState.target = Math.max(1000, alertState.target + delta)
-  alertState.armed = true
-  alertState.triggered = false
+  a.target = Math.max(ALERT_MIN[coin], a.target + steps * step)
+  a.armed = true
+  a.triggered = false
   saveAlert()
   checkAlert()
   render()
+}
+
+/** Jual SEMUA holding: satu koin, atau BTC+ETH sekaligus ('ALL'). */
+function sellAllCoin(coin: 'BTC' | 'ETH' | 'ALL'): string {
+  if (!prices) return 'NO PRICE YET'
+  const sold: string[] = []
+  const sellOne = (sym: 'BTC' | 'ETH'): void => {
+    const holding = sym === 'BTC' ? paper.btc : paper.eth
+    const price = sym === 'BTC' ? prices!.btc : prices!.eth
+    if (holding > 0) {
+      paper.cash += holding * price
+      if (sym === 'BTC') paper.btc = 0
+      else paper.eth = 0
+      sold.push(sym)
+    }
+  }
+  if (coin === 'ALL') {
+    sellOne('BTC')
+    sellOne('ETH')
+  } else {
+    sellOne(coin)
+  }
+  if (sold.length === 0) return 'NOTHING TO SELL'
+  savePaper()
+  render()
+  return sold.length === 2 ? 'SOLD ALL BTC+ETH' : `SOLD ALL ${sold[0]}`
+}
+
+/** Hapus alert aset aktif (target + armed + triggered direset). */
+function cancelActiveAlert(): string {
+  const coin = alertState.active
+  const a = activeAlert()
+  if (a.target === 0 && !a.armed && !a.triggered) return 'NO ALERT SET'
+  alertState.alerts[coin] = blankAlert()
+  saveAlert()
+  render()
+  return `ALERT ${coin} REMOVED`
 }
 
 function swipeUp(): void {
@@ -727,7 +894,7 @@ function swipeUp(): void {
     render()
     return
   }
-  if (view === 'alerts') { adjustAlert(1000); return }
+  if (view === 'alerts') { adjustAlert(1); return }
   const msg = buyCoin(view === 'paper-btc' ? 'BTC' : 'ETH')
   if (!msg.startsWith('BOUGHT')) showTransient(msg)
 }
@@ -746,7 +913,7 @@ function swipeDown(): void {
     render()
     return
   }
-  if (view === 'alerts') { adjustAlert(-1000); return }
+  if (view === 'alerts') { adjustAlert(-1); return }
   const msg = sellCoin(view === 'paper-btc' ? 'BTC' : 'ETH')
   if (!msg.startsWith('SOLD')) showTransient(msg)
 }
@@ -771,6 +938,13 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
   const textType = eventTypeOf(event.textEvent)
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    // Di view ALERTS, double-tap = ganti aset alert (BTC -> ETH -> SOL).
+    // SDK tidak punya gesture swipe kiri/kanan; double-tap adalah satu-satunya
+    // gesture diskrit yang bebas di view ini. Di view lain tetap keluar.
+    if (view === 'alerts') {
+      cycleAlertAsset()
+      return
+    }
     cancelListeningSync()
     bridge.shutDownPageContainer(1)
     return
