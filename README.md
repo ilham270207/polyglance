@@ -92,7 +92,7 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 *TICKER (v6) — live BTC, ETH, SOL, DOGE, XRP prices from CoinGecko, auto-refresh every 60 seconds.*
 
-![ODDS — Polymarket crypto markets](images/frame-odds-v5.png)
+![ODDS — Polymarket crypto markets](images/frame-odds-v8.png)
 
 *ODDS — top crypto markets on Polymarket with live YES %, each with a short distinct label (v5).*
 
@@ -100,11 +100,11 @@ Glasses display (576×288), captured in the Even Hub simulator.
 
 *PAPER — virtual $10,000 portfolio, buy/sell $100 per swipe.*
 
-![VOICE — push-to-talk voice commands](images/frame-voice-v5.png)
+![VOICE — push-to-talk voice commands](images/frame-voice-v8.png)
 
 *VOICE — push-to-talk voice commands via Groq Whisper (v5 capture; v6 adds `sell all bitcoin`, `show portfolio`, `cancel alert`).*
 
-![ALERTS — multi-asset price alerts + Telegram bot](images/frame-alerts-v6.png)
+![ALERTS — multi-asset price alerts + Telegram bot](images/frame-alerts-v8.png)
 
 *ALERTS (v6) — price alert for ETH (target $1,800, WAITING) with the Telegram bot row (`@polyglance_alerts_bot`); double-tap switches asset (BTC → ETH → SOL).*
 
@@ -158,12 +158,12 @@ Notes:
 - The simulator is a native desktop window and does not run in Termux —
   coding + `npm run dev` + `npm run build` work from Termux on Android,
   simulator testing needs a PC.
-- `app.json` whitelists the three API domains under the `network` permission
-  (CoinGecko, Polymarket Gamma, Hyperliquid).
+- `app.json` whitelists the five API domains under the `network` permission
+  (CoinGecko, Polymarket Gamma, Hyperliquid, Groq, Cloudflare Worker STT proxy).
 
 ## Install (.ehpk)
 
-`polyglance.ehpk` (in this repo) is the packaged v8 app — load it in the
+`polyglance.ehpk` (in this repo) is the packaged v8.1 app — load it in the
 Even Hub simulator or the Even App to try it without building.
 
 ## Project structure
@@ -178,8 +178,8 @@ index.html        # Vite entry + companion settings page (Groq key, STT proxy UR
 vite.config.ts    # Vite config (template)
 images/           # Simulator screenshots (TICKER / ODDS / PAPER / VOICE / ALERTS)
 watcher/          # Telegram bot + price watcher (Cloudflare Worker, Node fallback, tests)
-tests/            # Unit tests: voice parser (74), HL parser (28), STT fallback (18), watcher core (174)
-polyglance.ehpk   # Packaged v8 app for the simulator / Even App
+tests/            # Unit tests: voice parser (74), HL parser (28), STT fallback (18), watcher core (174), webhook (150)
+polyglance.ehpk   # Packaged v8.1 app for the simulator / Even App
 ```
 
 ## Submission
