@@ -376,6 +376,41 @@ export function parseFearGreed(data) {
   return { value, label: String(item?.value_classification ?? '') || '—' }
 }
 
+/** Dekode entity XML di judul RSS (&amp; &lt; &#39; &#123; ...). */
+function decodeXmlEntities(s) {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => {
+      const c = parseInt(n, 10)
+      return Number.isFinite(c) && c > 0 ? String.fromCharCode(c) : ''
+    })
+}
+
+/** Parse RSS crypto (CoinDesk / Cointelegraph). Ambil judul <item> — maks 5,
+  tanpa mengarang: feed kosong/rusak -> [] (bukan judul buatan). Judul
+  channel (<channel><title>) TIDAK ikut — hanya judul item berita. */
+export function parseNewsHeadlines(xmlText) {
+  if (typeof xmlText !== 'string' || xmlText.length === 0) return []
+  const titles = []
+  const itemRe = /<item[\s>][\s\S]*?<\/item>/gi
+  let m
+  while ((m = itemRe.exec(xmlText)) !== null && titles.length < 10) {
+    const titleM = /<title>([\s\S]*?)<\/title>/i.exec(m[0])
+    if (!titleM) continue
+    let t = titleM[1]
+    const cdata = /<!\[CDATA\[([\s\S]*?)\]\]>/.exec(t)
+    if (cdata) t = cdata[1]
+    t = t.replace(/<[^>]+>/g, ' ')
+    t = decodeXmlEntities(t).replace(/\s+/g, ' ').trim()
+    if (t.length > 0 && !titles.includes(t)) titles.push(t)
+  }
+  return titles.slice(0, 5)
+}
+
 /** Countdown ke market close: "closes in 12d 4h" / "closes in 3h 20m" / "closes in 45m" / "closed". */
 export function fmtCountdown(endIso, nowMs = Date.now()) {
   const end = Date.parse(endIso)

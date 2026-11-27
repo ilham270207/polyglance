@@ -84,6 +84,6 @@ export function moodLines(m: MoodInput): string[] {
     lines.push('funding loading...')
   }
   lines.push(`mood: ${level}`)
-  lines.push('tap: ticker >')
+  lines.push('tap: sltp >')
   return lines.slice(0, 8)
 }

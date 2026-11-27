@@ -7,7 +7,7 @@
 
 export type Coin = 'BTC' | 'ETH'
 export type AlertCoin = 'BTC' | 'ETH' | 'SOL'
-export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice' | 'ask' | 'whales' | 'mood'
+export type VoiceView = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice' | 'ask' | 'whales' | 'mood' | 'paper-sltp' | 'news'
 
 export type VoiceAction =
   | { type: 'goto'; view: VoiceView }
@@ -190,6 +190,11 @@ export function parseVoiceCommand(text: string): VoiceAction | null {
   if (has('paper', 'portfolio', 'trading', 'trade')) return { type: 'goto', view: 'paper-btc' }
   if (has('whales', 'whale')) return { type: 'goto', view: 'whales' }
   if (has('mood')) return { type: 'goto', view: 'mood' }
+  // v8.4: "show sltp" -> view PAPER-SLTP; "show news" / "headlines" ->
+  // view NEWS. ("stop loss" tidak dipakai sebagai pemicu — kata 'stop'
+  // sudah jadi perintah berhenti di atas.)
+  if (has('sltp')) return { type: 'goto', view: 'paper-sltp' }
+  if (has('news', 'headlines', 'headline')) return { type: 'goto', view: 'news' }
   // "ask" saja (atau "show ask") = pindah ke view ASK. Pertanyaan panjang
   // yang diawali "ask ..." (mis. "ask why is bitcoin down") TIDAK masuk
   // sini — jatuh ke intent ASK di bawah supaya pertanyaannya tidak hilang.

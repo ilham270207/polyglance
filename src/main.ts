@@ -1,9 +1,9 @@
-// PolyGlance v8.2 - 11 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram + HYPERLIQUID + ASK + WHALES + MOOD
-// v8.2: ASK (tanya pasar pakai suara, dijawab AI 2 baris via Worker /ask) +
-// WHALES (trade Polymarket >=$1.000 via Worker proxy /whales) + MOOD (Fear &
-// Greed gabungan via Worker proxy /fng). Morning Brief jalan di Worker saja.
+// PolyGlance v8.4 - 13 view + paper trade BTC/ETH + price alert + ODDS ALERT + VOICE + Telegram + HYPERLIQUID + ASK + WHALES + MOOD + PAPER SL/TP + NEWS
+// v8.4: PAPER SL/TP (stop-loss / take-profit otomatis per posisi paper) +
+// NEWS (headline crypto via Worker proxy /news) + bersih-bersih v8.3
+// (string mati 'NO GROQ KEY', komentar basi stt.ts, debug hooks).
 // Tap = pindah view (TICKER -> ODDS -> PAPER-BTC -> PAPER-ETH -> ALERTS ->
-// ODDS-ALERT -> HL -> VOICE -> ASK -> WHALES -> MOOD -> TICKER).
+// ODDS-ALERT -> HL -> VOICE -> ASK -> WHALES -> MOOD -> PAPER-SLTP -> NEWS -> TICKER).
 // Double-tap = keluar (kecuali di view ALERTS: ganti aset; di view ODDS-ALERT:
 // ganti pasar). Swipe up/down = aksi per view.
 // View VOICE: push-to-talk. Swipe up = mulai dengar, swipe up lagi = stop & kirim
@@ -18,11 +18,14 @@ import {
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import { parseVoiceCommand, rmsLevel, type VoiceAction, type AlertCoin } from './voice'
-import { transcribePcm, getGroqKey, getSttProxyUrl, GROQ_KEY_STORAGE } from './stt'
+import { transcribePcm, getGroqKey } from './stt'
 import { parseHlPerps, fmtFunding, fmtOi, type HlRow } from './hl'
 import { askMarket, wrapAskAnswer, getAskBaseUrl, stripAskTrigger } from './ask'
 import { whaleLines, type WhaleTrade } from './whales'
 import { moodLines } from './mood'
+import { slTpPct, slTpHit, slTpEntryAfterBuy, adjustSlTp, slTpLines, SLTP_DEFAULT_SL, SLTP_DEFAULT_TP, type SltpPosition } from './sltp'
+import { newsLines } from './news'
+import { shortOddsQuestion, dedupeOddsLabels } from './odds'
 
 const bridge = await waitForEvenAppBridge()
 
@@ -51,7 +54,7 @@ function truncate(s: string, max: number): string {
 }
 
 // ---------- state ----------
-type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice' | 'ask' | 'whales' | 'mood'
+type View = 'ticker' | 'odds' | 'paper-btc' | 'paper-eth' | 'alerts' | 'odds-alert' | 'hl' | 'voice' | 'ask' | 'whales' | 'mood' | 'paper-sltp' | 'news'
 let view: View = 'ticker'
 
 interface Prices {
@@ -190,10 +193,41 @@ async function fetchMood(): Promise<void> {
   }
 }
 
+// ---------- NEWS (v8.4) — headline crypto ----------
+// Judul dari Worker GET /news (proxy RSS CoinDesk, fallback Cointelegraph).
+// TIDAK PERNAH mengarang headline: gagal fetch = "no news right now".
+let news: string[] | null = null
+let newsOffline = false
+let newsLoaded = false
+let newsUpdated = ''
+
+async function fetchNews(): Promise<void> {
+  try {
+    const res = await fetch(`${getAskBaseUrl()}/news`, { signal: AbortSignal.timeout(8000) })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = (await res.json()) as { headlines?: unknown; updatedAt?: string }
+    if (!Array.isArray(data.headlines)) throw new Error('bad payload')
+    news = data.headlines.filter((h): h is string => typeof h === 'string')
+    newsOffline = false
+    newsLoaded = true
+    newsUpdated = data.updatedAt ? fmtTime(new Date(data.updatedAt)) : ''
+  } catch (err) {
+    console.log('news fetch failed:', err)
+    newsOffline = true
+  }
+}
+
 // ---------- paper trade (BTC + ETH, cash bersama) ----------
 const PAPER_KEY_V2 = 'polyglance.paper.v2'
 const PAPER_KEY_V1 = 'polyglance.paper.v1'
-interface PaperState { cash: number; btc: number; eth: number }
+interface PaperState {
+  cash: number; btc: number; eth: number
+  /** Harga entry rata-rata tertimbang per koin (null = belum ada posisi). */
+  btcEntry: number | null; ethEntry: number | null
+  /** SL/TP sebagai % offset dari entry (null = tidak di-set). */
+  btcSl: number | null; btcTp: number | null
+  ethSl: number | null; ethTp: number | null
+}
 
 function loadPaper(): PaperState {
   try {
@@ -201,7 +235,14 @@ function loadPaper(): PaperState {
     if (raw2) {
       const p = JSON.parse(raw2) as Partial<PaperState>
       if (typeof p.cash === 'number' && typeof p.btc === 'number' && typeof p.eth === 'number') {
-        return { cash: p.cash, btc: p.btc, eth: p.eth }
+        // State v8.3 (tanpa field SL/TP) dibaca mulus — field baru = null.
+        const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+        return {
+          cash: p.cash, btc: p.btc, eth: p.eth,
+          btcEntry: num(p.btcEntry), ethEntry: num(p.ethEntry),
+          btcSl: num(p.btcSl), btcTp: num(p.btcTp),
+          ethSl: num(p.ethSl), ethTp: num(p.ethTp),
+        }
       }
     }
     // Migrasi mulus dari v1 {cash, btc} - ETH mulai 0.
@@ -209,13 +250,13 @@ function loadPaper(): PaperState {
     if (raw1) {
       const p = JSON.parse(raw1) as Partial<PaperState>
       if (typeof p.cash === 'number' && typeof p.btc === 'number') {
-        return { cash: p.cash, btc: p.btc, eth: 0 }
+        return { cash: p.cash, btc: p.btc, eth: 0, btcEntry: null, ethEntry: null, btcSl: null, btcTp: null, ethSl: null, ethTp: null }
       }
     }
   } catch {
     // localStorage tidak tersedia / data rusak -> mulai dari awal
   }
-  return { cash: 10000, btc: 0, eth: 0 }
+  return { cash: 10000, btc: 0, eth: 0, btcEntry: null, ethEntry: null, btcSl: null, btcTp: null, ethSl: null, ethTp: null }
 }
 
 let paper: PaperState = loadPaper()
@@ -225,6 +266,75 @@ function savePaper(): void {
     localStorage.setItem(PAPER_KEY_V2, JSON.stringify(paper))
   } catch {
     // abaikan - state tetap jalan di memori sesi ini
+  }
+}
+
+// ---------- paper SL/TP (v8.4) — stop-loss / take-profit otomatis ----------
+// SL/TP disimpan sebagai % offset dari harga entry (default saat posisi
+// dibuka: SL -5%, TP +10%). Dicek tiap refresh harga (checkSlTp): posisi
+// yang menyentuh SL/TP langsung dijual semua di harga sekarang.
+let slTpCoin: 'BTC' | 'ETH' = 'BTC'
+let slTpField: 'sl' | 'tp' = 'sl'
+let slTpLastClose = ''
+
+function slTpPosition(sym: 'BTC' | 'ETH'): SltpPosition {
+  return sym === 'BTC'
+    ? { sym, holding: paper.btc, entry: paper.btcEntry, sl: paper.btcSl, tp: paper.btcTp }
+    : { sym, holding: paper.eth, entry: paper.ethEntry, sl: paper.ethSl, tp: paper.ethTp }
+}
+
+function setSlTp(sym: 'BTC' | 'ETH', field: 'sl' | 'tp', value: number): void {
+  if (sym === 'BTC') {
+    if (field === 'sl') paper.btcSl = value
+    else paper.btcTp = value
+  } else {
+    if (field === 'sl') paper.ethSl = value
+    else paper.ethTp = value
+  }
+}
+
+function clearSlTp(sym: 'BTC' | 'ETH'): void {
+  if (sym === 'BTC') { paper.btcEntry = null; paper.btcSl = null; paper.btcTp = null }
+  else { paper.ethEntry = null; paper.ethSl = null; paper.ethTp = null }
+}
+
+/** Koin dengan posisi paper terbuka (holding > 0), urutan BTC lalu ETH. */
+function openSltpPositions(): Array<'BTC' | 'ETH'> {
+  const out: Array<'BTC' | 'ETH'> = []
+  if (paper.btc > 0) out.push('BTC')
+  if (paper.eth > 0) out.push('ETH')
+  return out
+}
+
+/** Jaga slTpCoin tetap menunjuk posisi terbuka (dipanggil setelah posisi
+  ditutup/dijual). */
+function syncSlTpCoin(): void {
+  const open = openSltpPositions()
+  if (open.length > 0 && !open.includes(slTpCoin)) slTpCoin = open[0]
+}
+
+/** Cek SL/TP tiap refresh harga: posisi yang menyentuh ambang langsung
+  dijual semua di harga sekarang. Maks. satu penutupan per refresh (yang
+  lain kena di refresh berikutnya) — pola yang sama dengan checkAlert. */
+function checkSlTp(): void {
+  if (!prices) return
+  for (const sym of ['BTC', 'ETH'] as const) {
+    const pos = slTpPosition(sym)
+    if (pos.holding <= 0 || pos.entry === null) continue
+    const price = sym === 'BTC' ? prices.btc : prices.eth
+    const hit = slTpHit(pos, price)
+    if (!hit) continue
+    const pct = slTpPct(price, pos.entry)
+    paper.cash += pos.holding * price
+    if (sym === 'BTC') paper.btc = 0
+    else paper.eth = 0
+    clearSlTp(sym)
+    savePaper()
+    const pctStr = pct !== null ? `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%` : ''
+    slTpLastClose = `${sym} ${hit.toUpperCase()} ${pctStr} closed ${fmtUsd(price)}`
+    syncSlTpCoin()
+    showTransient(`${sym} ${hit.toUpperCase()} HIT - closed ${fmtUsd(price)}`)
+    return
   }
 }
 
@@ -469,13 +579,8 @@ function voiceResult(text: string, result: string): void {
 
 async function startListening(): Promise<void> {
   if (voicePhase === 'listening' || voicePhase === 'sending') return
-  // v8.3: voice jalan kalau ada key ATAU proxy. Proxy punya default
-  // (Worker publik), jadi di profil baru pun voice langsung jalan —
-  // key Groq tidak lagi wajib.
-  if (!getGroqKey() && !getSttProxyUrl()) {
-    voiceResult('', 'NO GROQ KEY - see settings')
-    return
-  }
+  // v8.4: voice selalu jalan — proxy punya default (Worker publik), jadi
+  // tidak ada lagi gate "no groq key" di sini (string mati itu dihapus).
   let ok = false
   try {
     ok = await bridge.audioControl(true)
@@ -517,13 +622,8 @@ async function stopListening(send: boolean): Promise<void> {
     return
   }
   const key = getGroqKey()
-  // v8.3: tanpa key pun boleh kirim — transcribePcm langsung ke proxy
-  // (key Groq dipegang Worker secret). Gate hanya kalau proxy juga tidak
-  // ada (tidak mungkin terjadi selama default v8.3 ada).
-  if (!key && !getSttProxyUrl()) {
-    voiceResult('', 'NO GROQ KEY - see settings')
-    return
-  }
+  // v8.4: tanpa key pun boleh kirim — transcribePcm langsung ke proxy
+  // (key Groq dipegang Worker secret). Tidak ada lagi gate "no groq key".
   voicePhase = 'sending'
   render()
   console.log(`voice sending ${bytes} bytes to groq`)
@@ -611,67 +711,8 @@ function executeVoiceAction(action: VoiceAction): string {
   }
 }
 
-// ---------- label odds: singkat tapi BERBEDA per pasar ----------
-// "Will Bitcoin dip to $55,000 in November?" -> "BTC dip $55,000? YES 48%"
-// "Will Ethereum reach $2,000 by...?"      -> "ETH reach $2,000? YES 7%"
-const ASSET_SYM: Array<[RegExp, string]> = [
-  [/\bbitcoin\b/i, 'BTC'],
-  [/\bbtc\b/i, 'BTC'],
-  [/\bethereum\b/i, 'ETH'],
-  [/\beth\b/i, 'ETH'],
-  [/\bsolana\b/i, 'SOL'],
-  [/\bsol\b/i, 'SOL'],
-  [/\bdogecoin\b/i, 'DOGE'],
-  [/\bdoge\b/i, 'DOGE'],
-  [/\bxrp\b/i, 'XRP'],
-  [/\bcryptocurrency\b/i, 'CRYPTO'],
-  [/\bcrypt\b/i, 'CRYPTO'],
-]
-
-function shortOddsLabel(question: string, yesPct: number): string {
-  const q = question.trim()
-  let sym = ''
-  for (const [re, s] of ASSET_SYM) {
-    if (re.test(q)) { sym = s; break }
-  }
-  const amt = q.match(/\$[\d,]+(?:\.\d+)?/)
-  const verb = /\b(dip|fall|drop|below|under)\b/i.test(q)
-    ? 'dip'
-    : /\b(reach|rise|exceed|above|over|hit)\b/i.test(q)
-      ? 'reach'
-      : 'hit'
-  if (sym && amt) {
-    const label = `${sym} ${verb} ${amt[0]}? YES ${yesPct}%`
-    if (label.length <= 34) return label
-  }
-  // Fallback: ekor pertanyaan (bagian yang membedakan, mis. angka target)
-  // dipotong dari depan agar bagian akhir yang tampil.
-  const tail = q.replace(/^Will\s+/i, '')
-  const label = `${truncate(tail, 22)} YES ${yesPct}%`
-  return label.length <= 34 ? label : `${truncate(tail, 20)} YES ${yesPct}%`
-}
-
-/** Label pasar TANPA angka YES% — dipakai view ODDS-ALERT (YES% punya baris
-  sendiri). "Will Bitcoin dip to $55,000 in November?" -> "BTC dip $55,000?" */
-function shortOddsQuestion(question: string): string {
-  const q = question.trim()
-  let sym = ''
-  for (const [re, s] of ASSET_SYM) {
-    if (re.test(q)) { sym = s; break }
-  }
-  const amt = q.match(/\$[\d,]+(?:\.\d+)?/)
-  const verb = /\b(dip|fall|drop|below|under)\b/i.test(q)
-    ? 'dip'
-    : /\b(reach|rise|exceed|above|over|hit)\b/i.test(q)
-      ? 'reach'
-      : 'hit'
-  if (sym && amt) {
-    const label = `${sym} ${verb} ${amt[0]}?`
-    if (label.length <= 34) return label
-  }
-  const tail = q.replace(/^Will\s+/i, '')
-  return truncate(tail, 34)
-}
+// Label ODDS tinggal di src/odds.ts (dipindah v8.4 supaya bisa di-unit-test,
+// termasuk dedupe label yang tabrakan).
 
 // ---------- render ----------
 function paperLines(sym: 'BTC' | 'ETH'): string[] {
@@ -726,18 +767,8 @@ function voiceLines(): string[] {
     return lines
   }
   // idle
-  // v8.3: tanpa key pun voice jalan via proxy default — cabang ini hanya
-  // tampil kalau key DAN proxy sama-sama tidak ada.
-  if (!getGroqKey() && !getSttProxyUrl()) {
-    return [
-      'VOICE - push to talk',
-      'no groq key set',
-      'set key in phone',
-      'settings page',
-      'up: listen (needs key)',
-      'tap: ask >',
-    ]
-  }
+  // v8.4: voice selalu jalan via proxy default (Worker publik) — tidak ada
+  // lagi cabang "no groq key" (string mati itu dihapus, F1 Lucas round-3).
   return [
     'VOICE - push to talk',
     'say: sell all bitcoin',
@@ -773,9 +804,9 @@ function buildContent(): string {
     if (markets.length === 0) return 'ODDS - POLYMARKET\nloading markets...\ntap: paper-btc >'
     const page = markets.slice(oddsPage * 3, oddsPage * 3 + 3)
     const lines = ['ODDS - POLYMARKET']
-    for (const m of page) {
-      lines.push(shortOddsLabel(m.question, m.yesPct))
-    }
+    // v8.4: label yang tabrakan (aset + angka sama, beda tanggal) dibedakan
+    // dengan bulan — kalau tidak muat, label tetap valid tanpa suffix.
+    lines.push(...dedupeOddsLabels(page))
     lines.push('data: polymarket')
     lines.push('tap: paper-btc >')
     return lines.join('\n')
@@ -842,6 +873,24 @@ function buildContent(): string {
       fundingAvg = hlRows.reduce((s, r) => s + r.funding, 0) / hlRows.length
     }
     return moodLines({ fng: moodFng, fngLabel: moodFngLabel, btcChg, topMover, fundingAvg, offline: moodOffline }).join('\n')
+  }
+
+  if (view === 'paper-sltp') {
+    const open = openSltpPositions()
+    const selIdx = Math.max(0, open.indexOf(slTpCoin))
+    const positions = open.map((sym) => slTpPosition(sym))
+    return slTpLines({
+      positions,
+      selected: selIdx,
+      field: slTpField,
+      prices: { BTC: prices ? prices.btc : 0, ETH: prices ? prices.eth : 0 },
+      lastClose: slTpLastClose,
+      nextViewLabel: 'news',
+    }).join('\n')
+  }
+
+  if (view === 'news') {
+    return newsLines(news, newsOffline, newsUpdated, newsLoaded).join('\n')
   }
 
   // voice
@@ -1097,8 +1146,10 @@ async function refreshAll(): Promise<void> {
   await fetchHl()
   await fetchWhales()
   await fetchMood()
+  await fetchNews()
   checkAlert()
   checkOddsAlert()
+  checkSlTp()
   render()
 }
 
@@ -1131,7 +1182,7 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
   return envelope.eventType ?? OsEventTypeList.CLICK_EVENT
 }
 
-const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'hl', 'voice', 'ask', 'whales', 'mood']
+const VIEW_ORDER: View[] = ['ticker', 'odds', 'paper-btc', 'paper-eth', 'alerts', 'odds-alert', 'hl', 'voice', 'ask', 'whales', 'mood', 'paper-sltp', 'news']
 
 function cancelListeningSync(): void {
   // Batalkan juga jawaban ASK yang masih jalan (askSeq++ membuat runAsk
@@ -1176,8 +1227,20 @@ function buyCoin(sym: 'BTC' | 'ETH'): string {
   if (!prices) return 'NO PRICE YET'
   if (paper.cash < 100) return 'NOT ENOUGH CASH'
   const price = sym === 'BTC' ? prices.btc : prices.eth
-  if (sym === 'BTC') paper.btc += 100 / price
-  else paper.eth += 100 / price
+  // SL/TP v8.4: entry = rata-rata tertimbang; posisi baru dapat SL -5% /
+  // TP +10% sebagai default (bisa diubah di view PAPER-SLTP).
+  const holding = sym === 'BTC' ? paper.btc : paper.eth
+  const entry = sym === 'BTC' ? paper.btcEntry : paper.ethEntry
+  const newEntry = slTpEntryAfterBuy(holding, entry, price, 100)
+  if (sym === 'BTC') {
+    paper.btc += 100 / price
+    paper.btcEntry = newEntry
+    if (holding <= 0) { paper.btcSl = SLTP_DEFAULT_SL; paper.btcTp = SLTP_DEFAULT_TP }
+  } else {
+    paper.eth += 100 / price
+    paper.ethEntry = newEntry
+    if (holding <= 0) { paper.ethSl = SLTP_DEFAULT_SL; paper.ethTp = SLTP_DEFAULT_TP }
+  }
   paper.cash -= 100
   savePaper()
   render()
@@ -1189,10 +1252,16 @@ function sellCoin(sym: 'BTC' | 'ETH'): string {
   const price = sym === 'BTC' ? prices.btc : prices.eth
   const holding = sym === 'BTC' ? paper.btc : paper.eth
   if (holding * price < 100) return sym === 'BTC' ? 'NOT ENOUGH BTC' : 'NOT ENOUGH ETH'
-  if (sym === 'BTC') paper.btc -= 100 / price
-  else paper.eth -= 100 / price
+  if (sym === 'BTC') {
+    paper.btc -= 100 / price
+    if (paper.btc < 1e-9) { paper.btc = 0; clearSlTp('BTC') }
+  } else {
+    paper.eth -= 100 / price
+    if (paper.eth < 1e-9) { paper.eth = 0; clearSlTp('ETH') }
+  }
   paper.cash += 100
   savePaper()
+  syncSlTpCoin()
   render()
   return `SOLD $100 ${sym}`
 }
@@ -1245,6 +1314,7 @@ function sellAllCoin(coin: 'BTC' | 'ETH' | 'ALL'): string {
       paper.cash += holding * price
       if (sym === 'BTC') paper.btc = 0
       else paper.eth = 0
+      clearSlTp(sym)
       sold.push(sym)
     }
   }
@@ -1256,6 +1326,7 @@ function sellAllCoin(coin: 'BTC' | 'ETH' | 'ALL'): string {
   }
   if (sold.length === 0) return 'NOTHING TO SELL'
   savePaper()
+  syncSlTpCoin()
   render()
   return sold.length === 2 ? 'SOLD ALL BTC+ETH' : `SOLD ALL ${sold[0]}`
 }
@@ -1340,6 +1411,37 @@ function adjustOddsAlert(steps: number): void {
   render()
 }
 
+/** Tap di view PAPER-SLTP: pindah ke posisi terbuka berikutnya; kalau
+  sudah di posisi terakhir (atau tidak ada posisi terbuka), lanjut ke view
+  berikut (NEWS) — tap tetap bisa keluar dari view ini. */
+function cycleSlTpPosition(): void {
+  const open = openSltpPositions()
+  if (open.length === 0) { nextView(); return }
+  if (!open.includes(slTpCoin)) slTpCoin = open[0]
+  const idx = open.indexOf(slTpCoin)
+  if (idx < open.length - 1) {
+    slTpCoin = open[idx + 1]
+    render()
+  } else {
+    nextView()
+  }
+}
+
+/** Geser SL/TP posisi terpilih +-1% (swipe up/down di view PAPER-SLTP).
+  Kalau ambang baru langsung terlampaui harga sekarang, posisi langsung
+  ditutup (checkSlTp). */
+function adjustSlTpSelected(steps: number): void {
+  if (!prices) { showTransient('NO PRICE YET'); return }
+  const pos = slTpPosition(slTpCoin)
+  if (pos.holding <= 0 || pos.entry === null) { showTransient('NO OPEN POSITION'); return }
+  const cur = slTpField === 'sl' ? pos.sl : pos.tp
+  const next = adjustSlTp(slTpField, cur, steps)
+  setSlTp(slTpCoin, slTpField, next)
+  savePaper()
+  checkSlTp()
+  render()
+}
+
 function swipeUp(): void {
   if (view === 'voice') {
     if (voicePhase === 'idle') { void startListening(); return }
@@ -1355,7 +1457,8 @@ function swipeUp(): void {
     void startListening()
     return
   }
-  if (view === 'whales' || view === 'mood') { void refreshAll(); return }
+  if (view === 'whales' || view === 'mood' || view === 'news') { void refreshAll(); return }
+  if (view === 'paper-sltp') { adjustSlTpSelected(1); return }
   if (view === 'ticker' || view === 'hl') { void refreshAll(); return }
   if (view === 'odds') {
     const pages = Math.max(1, Math.ceil(markets.length / 3))
@@ -1377,7 +1480,8 @@ function swipeDown(): void {
     return
   }
   if (view === 'ask') { prevView(); return }
-  if (view === 'whales' || view === 'mood') { void refreshAll(); return }
+  if (view === 'whales' || view === 'mood' || view === 'news') { void refreshAll(); return }
+  if (view === 'paper-sltp') { adjustSlTpSelected(-1); return }
   if (view === 'ticker' || view === 'hl') { void refreshAll(); return }
   if (view === 'odds') {
     const pages = Math.max(1, Math.ceil(markets.length / 3))
@@ -1423,12 +1527,24 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
       cycleOddsMarket()
       return
     }
+    // Di view PAPER-SLTP, double-tap = ganti field yang diedit (SL <-> TP).
+    if (view === 'paper-sltp') {
+      slTpField = slTpField === 'sl' ? 'tp' : 'sl'
+      render()
+      return
+    }
     cancelListeningSync()
     bridge.shutDownPageContainer(1)
     return
   }
 
   if (sysType === OsEventTypeList.CLICK_EVENT || textType === OsEventTypeList.CLICK_EVENT) {
+    // Di view PAPER-SLTP, tap = pindah ke posisi berikutnya (atau ke view
+    // berikut kalau sudah di posisi terakhir) — bukan langsung nextView.
+    if (view === 'paper-sltp') {
+      cycleSlTpPosition()
+      return
+    }
     nextView()
     return
   }
@@ -1449,11 +1565,9 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
   }
 })
 
-// ---------- debug + settings: perintah suara tanpa mic ----------
+// ---------- settings: perintah suara tanpa mic ----------
 // Halaman settings di HP (index.html) mengirim CustomEvent
 // 'polyglance-voice-cmd' {detail:{text}} — jalankan parser yang sama.
-// ?debugvoice=<teks> di URL = jalur debug simulator: otomatis jalankan
-// transcript itu sekali saat start (tanpa mic, tanpa key Groq).
 window.addEventListener('polyglance-voice-cmd', ((e: CustomEvent<{ text: string }>) => {
   const text = e.detail?.text
   if (typeof text === 'string' && text.trim()) {
@@ -1462,45 +1576,9 @@ window.addEventListener('polyglance-voice-cmd', ((e: CustomEvent<{ text: string 
   }
 }) as EventListener)
 
-// Hook debug untuk konsol WebView.
-;(window as unknown as { __pgVoiceDebug: (t: string) => void }).__pgVoiceDebug = (t: string) => {
-  view = 'voice'
-  handleVoiceTranscript(t)
-}
-
 // ---------- start: isi data lalu auto-refresh 60 detik ----------
 await refreshAll()
 setInterval(() => { void refreshAll() }, 60000)
 
-// Debug simulator: ?debugkey=1 pasang key DUMMY ke localStorage supaya jalur
-// mic bisa dites tanpa key asli (STT akan gagal 401 -> 'STT FAILED', itu yang
-// diharapkan). ?debugkey=clear menghapusnya lagi. TIDAK PERNAH dipakai di HP.
-try {
-  const dk = new URLSearchParams(window.location.search).get('debugkey')
-  if (dk === '1') {
-    try { localStorage.setItem(GROQ_KEY_STORAGE, 'DEBUG_KEY_FOR_SIMULATOR_TEST') } catch { /* abaikan */ }
-    console.log('voice debug: dummy key installed (simulator only)')
-  } else if (dk === 'clear') {
-    try { localStorage.removeItem(GROQ_KEY_STORAGE) } catch { /* abaikan */ }
-    console.log('voice debug: dummy key cleared')
-  }
-} catch {
-  // abaikan - URL tidak bisa dibaca
-}
-
-// Debug simulator: ?debugvoice=buy%20one%20hundred%20bitcoin
-try {
-  const dbg = new URLSearchParams(window.location.search).get('debugvoice')
-  if (dbg) {
-    console.log('voice debug param:', dbg)
-    setTimeout(() => {
-      view = 'voice'
-      handleVoiceTranscript(decodeURIComponent(dbg))
-    }, 1500)
-  }
-} catch {
-  // abaikan - URL tidak bisa dibaca
-}
-
 // Log status key (hanya ada/tidak, JANGAN PERNAH log nilai key).
-console.log('voice groq key set:', getGroqKey() !== null, '| storage key:', GROQ_KEY_STORAGE)
+console.log('voice groq key set:', getGroqKey() !== null)

@@ -35,6 +35,7 @@ import {
   parseCoinbaseCandles,
   aggregateCandles,
   parseFearGreed,
+  parseNewsHeadlines,
   candlesSvg,
   sparklineSvg,
   HELP_TEXT,
@@ -79,13 +80,18 @@ const KEY_BRIEF = 'polyglance-brief-v1' // {lastSentDate: 'YYYY-MM-DD'} — guar
 // --- v8.2: ASK / WHALES / MOOD / Morning Brief ---
 // Semua fitur baru TANPA KV, kecuali guard sekali-per-hari Morning Brief
 // (1 baca KV di jam 01:00 UTC + 1 tulis/hari — lihat tick §1d).
-// /ask + /whales + /fng pakai cache in-memory saja (bukan KV).
+// /ask + /whales + /fng + /news pakai cache in-memory saja (bukan KV).
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions'
 const GROQ_CHAT_MODEL = 'qwen/qwen3.8-27b'
 const ASK_TIMEOUT_MS = 15000
 const WHALES_TRADES_URL = 'https://data-api.polymarket.com/v2/trades?limit=100'
 const WHALES_CACHE_MS = 45 * 1000 // trade paus bergerak cepat — cache pendek
 const FNG_CACHE_MS = 5 * 60 * 1000 // Fear & Greed berubah 1x/hari — cache panjang
+const NEWS_FEED_URLS = [
+  'https://www.coindesk.com/arc/outboundfeeds/rss/',
+  'https://cointelegraph.com/rss',
+]
+const NEWS_CACHE_MS = 10 * 60 * 1000 // headline berubah tiap menit — cache 10 menit
 let askMinuteCount = 0 // batas in-memory: maks 60 pertanyaan ASK per menit per isolate
 let askMinuteStart = 0
 let askWebMinuteCount = 0 // batas in-memory TERPISAH untuk /ask-web: maks 60/menit per isolate
@@ -94,6 +100,8 @@ let whalesCache = null // {trades, updatedAt, count}
 let whalesCacheAt = 0
 let fngCache = null // {value, label, updatedAt}
 let fngCacheAt = 0
+let newsCache = null // {headlines, source, updatedAt}
+let newsCacheAt = 0
 let briefCache = { date: null, sentDate: null } // guard Morning Brief di memori (hemat baca KV)
 
 // Kenapa state dipecah 4 key: KV Cloudflare itu eventually consistent —
@@ -1436,6 +1444,38 @@ async function handleFng() {
   }
 }
 
+const newsCorsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+}
+
+/** GET /news -> {headlines, source, updatedAt}. Proxy RSS CoinDesk
+  (fallback Cointelegraph). Cache in-memory 10 menit; kalau fetch gagal,
+  sajikan cache basi. TIDAK PERNAH mengarang headline — feed kosong/rusak
+  dan tanpa cache -> 502 {headlines: []}. */
+async function handleNews() {
+  const now = Date.now()
+  if (newsCache && now - newsCacheAt < NEWS_CACHE_MS) {
+    return Response.json(newsCache, { headers: newsCorsHeaders })
+  }
+  for (const feedUrl of NEWS_FEED_URLS) {
+    try {
+      const res = await fetchWithTimeout(feedUrl, 8000)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const headlines = parseNewsHeadlines(await res.text())
+      if (headlines.length === 0) throw new Error('no headlines')
+      const payload = { headlines, source: new URL(feedUrl).hostname, updatedAt: new Date(now).toISOString() }
+      newsCache = payload
+      newsCacheAt = now
+      return Response.json(payload, { headers: newsCorsHeaders })
+    } catch (e) {
+      console.log('news feed failed:', feedUrl, e?.message || e)
+    }
+  }
+  if (newsCache) return Response.json(newsCache, { headers: newsCorsHeaders })
+  return Response.json({ error: 'news unavailable', headlines: [] }, { status: 502, headers: newsCorsHeaders })
+}
+
 /** Teks Morning Brief: harga 5 koin + Fear & Greed + 3 odds teratas.
   Dipakai tick §1d (kirim 08:00 WIB) dan /brief on-demand. */
 async function buildMorningBriefText(state) {
@@ -1629,10 +1669,17 @@ export default {
       // v8.2 MOOD: Fear & Greed Index (proxy Alternative.me).
       return handleFng()
     }
+    if (request.method === 'OPTIONS' && url.pathname === '/news') {
+      return new Response(null, { status: 204, headers: newsCorsHeaders })
+    }
+    if (request.method === 'GET' && url.pathname === '/news') {
+      // v8.4 NEWS: headline crypto (proxy RSS CoinDesk, fallback Cointelegraph).
+      return handleNews()
+    }
     return Response.json({
       ok: true,
       service: 'polyglance-watcher',
-      usage: 'GET /health — status (incl. webhook); GET /app — dashboard read-only; GET /setwebhook — pasang webhook Telegram ke /webhook (URL tetap); GET /webhookinfo — status webhook live; GET /setupbot — pasang profil bot + menu button (sekali-pakai); GET /botinfo — profil + menu button live; POST /webhook — Telegram webhook; POST /stt — STT fallback proxy (multipart file=WAV, needs GROQ_API_KEY secret); POST /ask — ask the market (JSON {question}, needs GROQ_API_KEY secret); POST /ask-web — ask the website assistant (JSON {question}, needs GROQ_API_KEY secret); GET /whales — big Polymarket crypto trades ($1,000+); GET /fng — Fear & Greed Index',
+      usage: 'GET /health — status (incl. webhook); GET /app — dashboard read-only; GET /setwebhook — pasang webhook Telegram ke /webhook (URL tetap); GET /webhookinfo — status webhook live; GET /setupbot — pasang profil bot + menu button (sekali-pakai); GET /botinfo — profil + menu button live; POST /webhook — Telegram webhook; POST /stt — STT fallback proxy (multipart file=WAV, needs GROQ_API_KEY secret); POST /ask — ask the market (JSON {question}, needs GROQ_API_KEY secret); POST /ask-web — ask the website assistant (JSON {question}, needs GROQ_API_KEY secret); GET /whales — big Polymarket crypto trades ($1,000+); GET /fng — Fear & Greed Index; GET /news — crypto headlines (CoinDesk RSS, Cointelegraph fallback)',
     })
   },
 }

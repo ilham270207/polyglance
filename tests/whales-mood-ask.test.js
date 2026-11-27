@@ -91,7 +91,7 @@ ok(ml.some((l) => l.includes('FEAR 11 - EXTREME FEAR')), `mood fng: ${JSON.strin
 ok(ml.some((l) => l.includes('BTC -3.5% 24h')), `mood btc: ${JSON.stringify(ml)}`)
 ok(ml.some((l) => l.includes('SOL +4.1%')), `mood top mover: ${JSON.stringify(ml)}`)
 ok(ml.some((l) => l.includes('mood: risk-off')), `mood level: ${JSON.stringify(ml)}`)
-eq(ml[ml.length - 1], 'tap: ticker >', 'mood footer')
+eq(ml[ml.length - 1], 'tap: sltp >', 'mood footer')
 const mlEmpty = mood.moodLines({ fng: null, fngLabel: '', btcChg: null, topMover: null, fundingAvg: null })
 ok(mlEmpty.includes('FEAR - no data'), 'mood tanpa fng')
 ok(mlEmpty.includes('prices loading...'), 'mood tanpa harga')

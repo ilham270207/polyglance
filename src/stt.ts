@@ -1,6 +1,8 @@
-// PolyGlance v5 — Groq Whisper STT client (browser/WebView).
+// PolyGlance v8.4 — Groq Whisper STT client (browser/WebView).
 // Key TIDAK PERNAH di-hardcode: diambil dari localStorage (diisi user lewat
-// halaman settings di HP). Tanpa key -> return null, view VOICE mati elegan.
+// halaman settings di HP). Sejak v8.3 key TIDAK LAGI wajib — tanpa key,
+// voice langsung lewat proxy default (Worker publik, key Groq dipegang
+// Worker secret), jadi view VOICE tidak pernah "mati" karena tidak ada key.
 //
 // Fallback proxy: fetch langsung ke api.groq.com dari WebView kacamata bisa
 // HANG (Cloudflare menahan client WebKitGTK — terbukti di simulator 26 Nov
